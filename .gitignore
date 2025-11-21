@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment variables
+.env
+
+# Venom-Bot tokens and session
+tokens/
+*.data.json
+
+# SQLite database
+*.db
+*.sqlite
+*.sqlite3
+
+# Audio files
+audio/
+temp/
+*.ogg
+*.wav
+*.mp3
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# QR codes generated
+qr/generated/
+
