@@ -1,6 +1,7 @@
 const logger = require('./utils/logger');
 const unifiedAIProcessor = require('./core/ai/unifiedAIProcessor');
 const textCorrector = require('./utils/textCorrector');
+const conversationalAI = require('./conversationalAI');
 
 class NLU {
   constructor() {

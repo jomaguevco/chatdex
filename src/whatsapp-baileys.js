@@ -585,7 +585,10 @@ class WhatsAppHandler {
         'cancelar todo', 'cancelar operacion', 'cancelar operación'
       ];
       
-      const isCancelCommand = cancelKeywords.some(keyword => textLower.includes(keyword));
+      // NO considerar "no" como cancelación si está en estado de confirmación de cliente
+      const isCancelCommand = currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION 
+        ? false 
+        : cancelKeywords.some(keyword => textLower.includes(keyword));
       
       if (isCancelCommand && currentState !== sessionManager.STATES.IDLE && currentState !== sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION) {
         // Cancelar operación actual y volver al inicio
@@ -1642,21 +1645,24 @@ class WhatsAppHandler {
         );
         return; // Salir sin procesar más
       }
-        await this.sendMessage(
-          jidToUse,
-          '👋 *¡Hola!* 👋\n\n' +
-          'No pude procesar tu mensaje de voz completamente.\n\n' +
-          '📋 *¿Qué deseas hacer?*\n\n' +
-          '🛍️ *Ver productos:* Escribe *CATALOGO*\n' +
-          '🛒 *Hacer pedido:* Escribe lo que necesitas\n' +
-          '💰 *Consultar precio:* "¿Cuánto cuesta X?"\n' +
-          '📊 *Ver pedido:* Escribe *ESTADO*\n\n' +
-          '💡 *Tip:* Intenta hablar más claro o escribe tu pedido directamente.'
+
+      logger.success(`🎤 Transcripción exitosa: "${transcription}"`);
+
+      // Validar que la transcripción no esté vacía
+      if (!transcription || transcription.trim().length === 0) {
+        logger.warn('⚠️ Transcripción vacía, solicitando al usuario que repita');
+        await this.sendMessage(jidToUse, 
+          `😅 No pude entender tu mensaje de voz.\n\n` +
+          `Por favor, intenta:\n` +
+          `• Hablar más claro y cerca del micrófono\n` +
+          `• Enviar un mensaje de texto en su lugar\n` +
+          `• Escribir *AYUDA* para ver las opciones`
         );
         return;
       }
 
-      logger.success(`🎤 Transcripción exitosa: "${transcription}"`);
+      // Mostrar al usuario qué entendió el bot (mejora la experiencia)
+      await this.sendMessage(jidToUse, `🎤 Entendí: "${transcription}"`);
 
       // Guardar transcripción en historial
       await sessionManager.saveMessage(phoneNumber, 'voice', transcription, false);
@@ -1670,6 +1676,216 @@ class WhatsAppHandler {
       
       const stateObj = session.current_order ? JSON.parse(session.current_order) : {};
       const currentState = session.state || sessionManager.STATES.IDLE;
+      
+      // PRIORIDAD ABSOLUTA 0: Si es CONFIRMO, procesar confirmación DIRECTAMENTE
+      const confirmPattern = /(?:confirmo|confirmar|confirma|si|sí|ok|okay|acepto|aceptar|yes)/i;
+      const isConfirm = confirmPattern.test(transcription) && transcription.length < 20; // Solo si es corto (no análisis)
+      
+      if (isConfirm && (currentState === sessionManager.STATES.PEDIDO_EN_PROCESO || currentState === sessionManager.STATES.AWAITING_CONFIRMATION)) {
+        logger.info('✅ PRIORIDAD: Confirmación de pedido detectada');
+        try {
+          const orderHandler = require('./orderHandler');
+          const sessionStateWithPhone = { 
+            state: currentState,
+            phoneNumber,
+            nombreCliente: 'Cliente',
+            remoteJid: jidToUse,
+            authenticated: stateObj._authenticated || false,
+            ...stateObj
+          };
+          await orderHandler.confirmOrder(phoneNumber, this, sessionStateWithPhone);
+          return; // Salir inmediatamente
+        } catch (confirmError) {
+          logger.error('Error al confirmar pedido', confirmError);
+          // Continuar con el flujo normal si falla
+        }
+      }
+      
+      // PRIORIDAD ABSOLUTA 1: Si es un PEDIDO, procesarlo DIRECTAMENTE
+      // Detectar múltiples variaciones de pedidos (incluso con errores de transcripción)
+      const orderPattern = /(?:quiero hacer un pedido|quiero hacer pedido|quiero pedir|vamos a hacer un pedido|vamos a hacer pedido|vamos a pedir|va a ser un pedido|va a ser pedido|ser un pedido|ser pedido|necesito|quiero comprar|quiero|dame|deme|pedir|hacer pedido|comprar|ordenar|hacer una compra|hacer compra|necesito comprar|necesito pedir|pedidoss|pedidos)/i;
+      const isOrder = orderPattern.test(transcription);
+      
+      logger.info('🔍 Verificando si es pedido', {
+        transcription: transcription.substring(0, 50),
+        isOrder,
+        matches: transcription.match(orderPattern)
+      });
+      
+      if (isOrder) {
+        logger.info('🛒 PRIORIDAD: Pedido detectado, procesando directamente');
+        
+        try {
+          const productExtractorAI = require('./productExtractorAI');
+          const productInfo = await productExtractorAI.extractProductInfo(transcription);
+          
+          logger.info('✅ Información extraída para pedido', {
+            producto: productInfo.producto,
+            intencion: productInfo.intencion,
+            marca: productInfo.marca
+          });
+          
+          if (productInfo && productInfo.producto && productInfo.producto.length > 2) {
+            const producto = await productExtractorAI.searchProduct(productInfo);
+            
+            if (producto) {
+              const precio = typeof producto.precio_venta === 'number' 
+                ? producto.precio_venta.toFixed(2) 
+                : parseFloat(producto.precio_venta || 0).toFixed(2);
+              
+              const stock = producto.stock_actual || 0;
+              
+              if (stock > 0) {
+                // Iniciar flujo de pedido
+                const orderHandler = require('./orderHandler');
+                const cantidad = 1; // Por defecto 1, el usuario puede cambiar después
+                
+                // Agregar producto al pedido
+                await orderHandler.addProductToOrder(
+                  phoneNumber, 
+                  producto.id, 
+                  cantidad, 
+                  producto.nombre, 
+                  this // whatsappHandler
+                );
+                
+                await this.sendMessage(jidToUse,
+                  `🛒 *Pedido iniciado*\n\n` +
+                  `Producto: *${producto.nombre}*\n` +
+                  `Cantidad: *${cantidad}*\n` +
+                  `Precio unitario: *S/ ${precio}*\n` +
+                  `Stock disponible: *${stock} unidades*\n\n` +
+                  `💬 ¿Confirmas este pedido? Responde *CONFIRMO* para continuar.`
+                );
+                return; // Salir inmediatamente
+              } else {
+                await this.sendMessage(jidToUse,
+                  `😅 Lo siento, *${producto.nombre}* está agotado.\n\n` +
+                  `💡 Puedo ayudarte a buscar productos similares. Escribe *CATALOGO* para ver otros productos disponibles.`
+                );
+                return;
+              }
+            } else {
+              logger.warn(`⚠️ No se encontró producto para pedido: "${productInfo.producto}"`);
+              await this.sendMessage(jidToUse,
+                `😅 No encontré "${productInfo.producto}" en nuestro catálogo.\n\n` +
+                `💡 Puedo ayudarte a buscar productos similares. Escribe *CATALOGO* para ver todos nuestros productos.`
+              );
+              return;
+            }
+          } else {
+            logger.warn('⚠️ No se pudo extraer producto del pedido, intentando búsqueda directa');
+            
+            // Intentar búsqueda directa con palabras clave del mensaje
+            const kardexDb = require('./kardexDb');
+            const kardexApi = require('./kardexApi');
+            
+            // Extraer palabras clave: disco, duro, kingston, ssd, terabyte, etc.
+            const keywords = transcription.toLowerCase()
+              .replace(/[^a-z0-9\s]/g, ' ')
+              .split(/\s+/)
+              .filter(w => w.length > 3 && !['quiero', 'hacer', 'pedido', 'comprar', 'necesito', 'dame', 'deme'].includes(w));
+            
+            logger.info('Buscando producto con palabras clave', { keywords });
+            
+            for (const keyword of keywords) {
+              if (keyword.length < 3) continue;
+              
+              let productos = null;
+              if (kardexDb.isConnected()) {
+                productos = await kardexDb.buscarProductos(keyword, 5);
+              }
+              if (!productos || productos.length === 0) {
+                productos = await kardexApi.buscarProductos(keyword);
+              }
+              
+              if (productos && productos.length > 0) {
+                const producto = productos[0];
+                const precio = typeof producto.precio_venta === 'number' 
+                  ? producto.precio_venta.toFixed(2) 
+                  : parseFloat(producto.precio_venta || 0).toFixed(2);
+                
+                const stock = producto.stock_actual || 0;
+                
+                if (stock > 0) {
+                  const orderHandler = require('./orderHandler');
+                  await orderHandler.addProductToOrder(phoneNumber, producto.id, 1, producto.nombre, this);
+                  
+                  await this.sendMessage(jidToUse,
+                    `🛒 *Pedido iniciado*\n\n` +
+                    `Producto: *${producto.nombre}*\n` +
+                    `Cantidad: *1*\n` +
+                    `Precio unitario: *S/ ${precio}*\n` +
+                    `Stock disponible: *${stock} unidades*\n\n` +
+                    `💬 ¿Confirmas este pedido? Responde *CONFIRMO* para continuar.`
+                  );
+                  return;
+                }
+              }
+            }
+            
+            // Si no se encuentra, continuar con el flujo normal
+            logger.warn('⚠️ No se encontró producto después de búsqueda directa');
+          }
+        } catch (orderError) {
+          logger.error('Error al procesar pedido', orderError);
+          // Continuar con el flujo normal si falla
+        }
+      }
+      
+      // PRIORIDAD ABSOLUTA 2: Si es consulta de precio/producto, procesarla DIRECTAMENTE
+      // Esto debe estar ANTES de cualquier otro flujo, incluso autenticación
+      const priceQueryPattern = /(?:cuánto|cuanto|precio|vale|cuesta|a cuánto|a cuanto|cuánto sale|cuanto sale|cuánto vale|cuanto vale|precio de|cuál es el precio|cual es el precio|cuánto está|cuanto esta|cuánto esta|cuanto está|quiero saber|necesito saber|dime|dime el precio|dime cuánto|cuál es|cuál|cuanto|cuánto)/i;
+      const productQueryPattern = /(?:tienes|hay|disponible|stock|tienen|queda|producto|productos|balón|balon|pelota|camiseta|laptop|mouse|teclado)/i;
+      const isProductQuery = priceQueryPattern.test(transcription) || productQueryPattern.test(transcription);
+      
+      if (isProductQuery) {
+        logger.info('🔍 PRIORIDAD: Consulta de precio/producto detectada, procesando ANTES de cualquier otro flujo');
+        
+        try {
+          const productExtractorAI = require('./productExtractorAI');
+          const productInfo = await productExtractorAI.extractProductInfo(transcription);
+          
+          logger.info('✅ Información extraída por IA', {
+            producto: productInfo.producto,
+            intencion: productInfo.intencion,
+            marca: productInfo.marca
+          });
+          
+          if (productInfo && productInfo.producto && productInfo.producto.length > 2) {
+            const producto = await productExtractorAI.searchProduct(productInfo);
+            
+            if (producto) {
+              const precio = typeof producto.precio_venta === 'number' 
+                ? producto.precio_venta.toFixed(2) 
+                : parseFloat(producto.precio_venta || 0).toFixed(2);
+              
+              const stock = producto.stock_actual || 0;
+              const stockMsg = stock > 0 ? `✅ Disponible (${stock} unidades)` : '❌ Agotado';
+              
+              logger.success(`✅ Producto encontrado: ${producto.nombre} - S/ ${precio}`);
+              
+              await this.sendMessage(jidToUse,
+                `💰 *${producto.nombre}*\n\n` +
+                `Precio: *S/ ${precio}*\n` +
+                `Stock: ${stockMsg}\n\n` +
+                `💬 ¿Te interesa? Puedes pedirlo escribiendo el nombre o enviando una nota de voz.`
+              );
+              return; // Salir inmediatamente, no procesar más
+            } else {
+              logger.warn(`⚠️ No se encontró producto: "${productInfo.producto}"`);
+              await this.sendMessage(jidToUse,
+                `😅 No encontré "${productInfo.producto}" en nuestro catálogo.\n\n` +
+                `💡 Puedo ayudarte a buscar productos similares. Escribe *CATALOGO* para ver todos nuestros productos.`
+              );
+              return; // Salir inmediatamente
+            }
+          }
+        } catch (productError) {
+          logger.error('Error al procesar consulta de producto (prioridad)', productError);
+          // Si falla, continuar con el flujo normal
+        }
+      }
       
       // FLUJO 0 (VOZ): Si está esperando confirmación si es cliente registrado (ANTES de cancelación universal)
       if (currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION) {
@@ -1718,6 +1934,7 @@ class WhatsAppHandler {
       // FLUJO ESPECIAL: Si está esperando contraseña y dice que olvidó su contraseña
       if (currentState === sessionManager.STATES.AWAITING_PASSWORD) {
         // Detectar si el usuario dice que olvidó su contraseña
+        const transcriptionLower = transcription.toLowerCase().trim();
         const forgotPasswordKeywords = [
           'olvide', 'olvidé', 'olvido', 'olvidó', 'olvido mi contraseña',
           'olvide contraseña', 'olvidé contraseña', 'no recuerdo',
@@ -1780,6 +1997,11 @@ class WhatsAppHandler {
       // Si está en AWAITING_PASSWORD, ya tiene los datos del cliente guardados, no pedir número
       // Para números nuevos, intentar usar el número del remitente primero
       if (!stateObj._input_phone && !stateObj._authenticated && !stateObj._temp_nombre) {
+        // Importar PhoneNormalizer aquí para evitar errores de scope
+        const PhoneNormalizer = require('./utils/phoneNormalizer');
+        const kardexApi = require('./kardexApi');
+        const kardexDb = require('./kardexDb');
+        
         // Intentar buscar cliente usando el número del remitente directamente
         const remitenteNormalized = PhoneNormalizer.normalize(phoneNumber);
         logger.info(`🔍 [VOZ] Buscando cliente con número del remitente: ${remitenteNormalized}`);
@@ -1818,7 +2040,7 @@ class WhatsAppHandler {
         }
       }
       
-      // Si no está autenticado y no está en ningún flujo activo, verificar si es un saludo primero
+      // Si no es consulta de producto, verificar si necesita flujo inicial
       const needsInitialFlow = !stateObj._authenticated && 
                          !stateObj._temp_nombre && 
                          !stateObj._input_phone &&
@@ -1847,9 +2069,10 @@ class WhatsAppHandler {
         return;
       }
 
-      // Obtener cliente según estado
+      // Obtener cliente según estado (importar si no están ya importados)
       const kardexApi = require('./kardexApi');
       const kardexDb = require('./kardexDb');
+      const conversationalAI = require('./conversationalAI');
       let cliente = null;
       let nombreCliente = 'Cliente';
       
@@ -1894,7 +2117,7 @@ class WhatsAppHandler {
       // Procesar con NLU (marcar como mensaje de voz)
       // Pasar phoneNumber y nombreCliente en sessionState
       const sessionStateWithPhone = { 
-        ...session.state, 
+        state: currentState,
         phoneNumber,
         nombreCliente,
         cliente: cliente || null,
@@ -1905,47 +2128,151 @@ class WhatsAppHandler {
           nombre: stateObj._temp_nombre,
           dni: stateObj._temp_dni,
           phone: stateObj._temp_phone
-        } : null
+        } : null,
+        ...stateObj // Incluir todos los datos del estado
       };
-      const nluResult = await nlu.processMessage(transcription, sessionStateWithPhone, conversationHistory, true);
       
-      logger.info(`🔍 NLU procesó voz: intent=${nluResult.intent}, tiene response=${!!nluResult.response}`);
+      logger.info('🔍 Procesando transcripción con NLU', {
+        transcription: transcription.substring(0, 50),
+        currentState,
+        authenticated: stateObj._authenticated
+      });
+      
+      let nluResult;
+      try {
+        nluResult = await nlu.processMessage(transcription, sessionStateWithPhone, conversationHistory, true);
+        logger.info(`🔍 NLU procesó voz: intent=${nluResult.intent}, tiene response=${!!nluResult.response}`);
+        
+        // Si no hay resultado o respuesta, usar IA conversacional directamente
+        if (!nluResult || !nluResult.response) {
+          logger.warn('⚠️ NLU no devolvió respuesta, usando IA conversacional');
+          try {
+            const conversationalResponse = await conversationalAI.generateResponse(
+              transcription,
+              sessionStateWithPhone,
+              conversationHistory,
+              'unknown'
+            );
+            
+            if (conversationalResponse) {
+              await this.sendMessage(jidToUse, conversationalResponse);
+              await sessionManager.saveMessage(phoneNumber, 'text', conversationalResponse, true);
+              return;
+            }
+          } catch (convError) {
+            logger.warn('Error en IA conversacional, intentando procesar como texto', convError);
+          }
+          
+          // Si la IA conversacional también falla, procesar como texto normal
+          await this.processTextMessage(phoneNumber, transcription, remoteJid);
+          return;
+        }
+      } catch (nluError) {
+        logger.error('❌ Error en NLU, usando IA conversacional como fallback', {
+          error: nluError.message,
+          stack: nluError.stack?.substring(0, 300),
+          transcription
+        });
+        
+        // Si falla el NLU, usar IA conversacional directamente
+        try {
+          const conversationalResponse = await conversationalAI.generateResponse(
+            transcription,
+            sessionStateWithPhone,
+            conversationHistory,
+            'unknown'
+          );
+          
+          if (conversationalResponse) {
+            logger.success('✅ Respuesta generada por IA conversacional (fallback)');
+            await this.sendMessage(jidToUse, conversationalResponse);
+            await sessionManager.saveMessage(phoneNumber, 'text', conversationalResponse, true);
+            return;
+          }
+        } catch (convError) {
+          logger.warn('Error en IA conversacional, intentando procesar como texto', convError);
+        }
+        
+        // Si la IA conversacional también falla, procesar como mensaje de texto normal
+        try {
+          await this.processTextMessage(phoneNumber, transcription, remoteJid);
+        } catch (textError) {
+          logger.error('❌ Error al procesar como texto también', textError);
+          // Último fallback: respuesta básica
+          await this.sendMessage(jidToUse, 
+            `👋 ¡Hola! 👋\n\n` +
+            `Entendí: "${transcription}"\n\n` +
+            `¿En qué puedo ayudarte? Puedo ayudarte con productos, pedidos o cualquier consulta. 😊`
+          );
+        }
+        return;
+      }
 
       // Manejar respuesta del NLU
-      if (nluResult.response) {
+      if (nluResult && nluResult.response) {
         // Si tiene acción, manejarla
         if (nluResult.response.action) {
-          await this.handleAction(jidToUse, nluResult.response.action, nluResult.response, sessionStateWithPhone);
+          try {
+            await this.handleAction(jidToUse, nluResult.response.action, nluResult.response, sessionStateWithPhone);
+          } catch (actionError) {
+            logger.error('❌ Error al ejecutar acción, procesando como texto normal', actionError);
+            // Si falla la acción, procesar como texto normal
+            await this.processTextMessage(phoneNumber, transcription, remoteJid);
+          }
+          return;
         } 
         // Si tiene mensaje, enviarlo
-        else if (nluResult.response.message) {
+        if (nluResult.response.message) {
           await this.sendMessage(jidToUse, nluResult.response.message);
           await sessionManager.saveMessage(phoneNumber, 'text', nluResult.response.message, true);
+          return;
         }
         // Si tiene productos (catálogo), enviar mensaje formateado
-        else if (nluResult.response.productos) {
+        if (nluResult.response.productos) {
           await this.sendMessage(jidToUse, nluResult.response.message || 'Catálogo de productos');
           await sessionManager.saveMessage(phoneNumber, 'text', nluResult.response.message || 'Catálogo de productos', true);
+          return;
         }
-      } else {
-        logger.warn('⚠️ NLU no devolvió respuesta para mensaje de voz, dando opciones útiles');
+      }
+      
+      // Si no hay respuesta del NLU, usar IA conversacional directamente
+      logger.warn('⚠️ NLU no devolvió respuesta útil, usando IA conversacional');
+      try {
+        const conversationalResponse = await conversationalAI.generateResponse(
+          transcription,
+          sessionStateWithPhone,
+          conversationHistory,
+          nluResult?.intent || 'unknown'
+        );
+        
+        if (conversationalResponse) {
+          logger.success('✅ Respuesta generada por IA conversacional');
+          await this.sendMessage(jidToUse, conversationalResponse);
+          await sessionManager.saveMessage(phoneNumber, 'text', conversationalResponse, true);
+          return;
+        }
+      } catch (convError) {
+        logger.warn('Error en IA conversacional, intentando procesar como texto', convError);
+      }
+      
+      // Si la IA conversacional falla, procesar como texto normal
+      try {
+        await this.processTextMessage(phoneNumber, transcription, remoteJid);
+      } catch (textError) {
+        logger.error('❌ Error al procesar como texto, dando respuesta básica', textError);
         await this.sendMessage(jidToUse, 
-          `👋 *¡Hola!* 👋\n\n` +
-          `No pude procesar tu mensaje de voz completamente.\n\n` +
-          `📋 *¿Qué deseas hacer?*\n\n` +
-          `🛍️ *Ver productos:* Escribe *CATALOGO*\n` +
-          `🛒 *Hacer pedido:* Escribe lo que necesitas\n` +
-          `💰 *Consultar precio:* "¿Cuánto cuesta X?"\n` +
-          `📊 *Ver pedido:* Escribe *ESTADO*\n\n` +
-          `💡 *Tip:* Intenta hablar más claro o escribe tu pedido directamente.`
+          `👋 ¡Hola! 👋\n\n` +
+          `Entendí: "${transcription}"\n\n` +
+          `¿En qué puedo ayudarte? Puedo ayudarte con productos, pedidos o cualquier consulta. 😊`
         );
       }
 
     } catch (error) {
       logger.error('❌ Error al procesar mensaje de voz:', {
         error: error.message,
-        stack: error.stack,
-        audioPath: audioPath || 'N/A'
+        stack: error.stack?.substring(0, 500),
+        audioPath: audioPath || 'N/A',
+        transcription: typeof transcription !== 'undefined' ? transcription : 'N/A'
       });
       
       // Limpiar archivo temporal si existe
@@ -1957,28 +2284,38 @@ class WhatsAppHandler {
       const jidToUse = remoteJid || (phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`);
       
       try {
-        // Si tenemos una transcripción parcial (variable transcription puede existir en scope)
+        // Si tenemos una transcripción (incluso parcial), intentar procesarla
         if (typeof transcription !== 'undefined' && transcription && transcription.trim().length > 0) {
-          logger.info(`[Recovery] Intentando usar transcripción parcial: "${transcription}"`);
+          logger.info(`[Recovery] Intentando procesar transcripción: "${transcription}"`);
           
-          const intentDetector = require('./utils/intentDetector');
-          const session = await sessionManager.getSession(phoneNumber).catch(() => null);
-          const stateObj = session?.current_order ? JSON.parse(session.current_order) : {};
-          
-          const fallbackIntent = await intentDetector.detectIntent(transcription, { 
-            state: session?.state || 'idle',
-            ...stateObj 
-          }, []);
-          
-          if (fallbackIntent.intent !== 'unknown' && fallbackIntent.confidence > 0.4) {
-            logger.info(`[Recovery] Intención detectada desde transcripción parcial: ${fallbackIntent.intent}`);
-            // Procesar como mensaje de texto normal
-            await this.processTextMessage(phoneNumber, transcription, remoteJid).catch(() => {});
+          // Intentar procesar como mensaje de texto normal
+          try {
+            await this.processTextMessage(phoneNumber, transcription, remoteJid);
+            logger.info('[Recovery] ✅ Transcripción procesada exitosamente como texto');
             return; // Salir sin mostrar error
+          } catch (textProcessError) {
+            logger.warn('[Recovery] Error al procesar transcripción como texto, intentando con intentDetector', textProcessError);
+            
+            // Intentar con intentDetector como último recurso
+            const intentDetector = require('./utils/intentDetector');
+            const session = await sessionManager.getSession(phoneNumber).catch(() => null);
+            const stateObj = session?.current_order ? JSON.parse(session.current_order) : {};
+            
+            const fallbackIntent = await intentDetector.detectIntent(transcription, { 
+              state: session?.state || 'idle',
+              ...stateObj 
+            }, []);
+            
+            if (fallbackIntent.intent !== 'unknown' && fallbackIntent.confidence > 0.4) {
+              logger.info(`[Recovery] Intención detectada: ${fallbackIntent.intent}`);
+              // Procesar como mensaje de texto normal
+              await this.processTextMessage(phoneNumber, transcription, remoteJid).catch(() => {});
+              return; // Salir sin mostrar error
+            }
           }
         }
         
-        // Si no hay transcripción, mensaje de error amigable
+        // Si no hay transcripción o no se pudo procesar, mensaje de error amigable
         await this.sendMessage(jidToUse, 
           `😅 Lo siento, no pude procesar tu mensaje de voz en este momento.\n\n` +
           `💡 Por favor intenta:\n` +

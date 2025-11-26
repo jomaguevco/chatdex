@@ -13,7 +13,7 @@ class BasicBot {
       catalog: ['catalogo', 'catálogo', 'productos', 'producto', 'lista', 'ver productos', 'quiero ver', 'muestrame', 'muéstrame', 'mostrar', 'ver catálogo', 'ver catalogo', 'que tienen', 'qué tienen', 'que venden', 'qué venden'],
       help: ['ayuda', 'help', 'comandos', 'que puedo hacer', 'qué puedo hacer', 'opciones', 'como funciona', 'cómo funciona', 'que hago', 'qué hago', 'necesito ayuda', 'ayúdame', 'ayudame'],
       status: ['estado', 'status', 'mi pedido', 'pedido', 'orden', 'ver pedido', 'ver mi pedido', 'mostrar pedido', 'listar pedido', 'productos del pedido', 'qué tengo en el pedido', 'que tengo', 'qué tengo'],
-      cancel: ['cancelar', 'cancel', 'no quiero', 'no gracias', 'salir', 'salirme', 'volver', 'volver atrás', 'volver atras', 'volver al inicio', 'inicio', 'empezar de nuevo', 'comenzar de nuevo', 'reiniciar', 'resetear', 'cerrar', 'terminar', 'acabar', 'parar', 'detener', 'no', 'mejor no', 'déjalo', 'dejalo', 'no importa', 'olvídalo', 'olvidalo', 'déjame en paz', 'déjame tranquilo', 'adiós', 'adios', 'chau', 'bye']
+      cancel: ['cancelar', 'cancel', 'no quiero', 'no gracias', 'salir', 'salirme', 'volver', 'volver atrás', 'volver atras', 'volver al inicio', 'inicio', 'empezar de nuevo', 'comenzar de nuevo', 'reiniciar', 'resetear', 'cerrar', 'terminar', 'acabar', 'parar', 'detener', 'mejor no', 'déjalo', 'dejalo', 'no importa', 'olvídalo', 'olvidalo', 'déjame en paz', 'déjame tranquilo', 'adiós', 'adios', 'chau', 'bye']
     };
     this.categoryKeywords = [
       // categorías comunes de tecnología
