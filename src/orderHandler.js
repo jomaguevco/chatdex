@@ -139,7 +139,9 @@ class OrderHandler {
       return '📦 *Tu pedido está vacío*\n\nAgrega productos escribiendo sus nombres.';
     }
 
-    let resumen = `🛒 *Pedido iniciado - ${pedido.numero_pedido}*\n\n`;
+    let resumen = `✅ *PEDIDO PROCESADO*\n\n`;
+    resumen += `📦 *Pedido N°:* ${pedido.numero_pedido}\n\n`;
+    resumen += `📄 *FACTURA*\n\n`;
     
     pedido.detalles.forEach((detalle, index) => {
       const producto = detalle.producto || {};
@@ -149,6 +151,7 @@ class OrderHandler {
     });
 
     resumen += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    resumen += `💰 *PRECIO DEL ${pedido.detalles[0]?.producto?.nombre?.toUpperCase() || 'PRODUCTO'}:*\n`;
     resumen += `💰 *Total: S/. ${parseFloat(pedido.total).toFixed(2)}*\n\n`;
     resumen += `💬 *¿Confirmas este pedido?*\n`;
     resumen += `Responde *CONFIRMO* para continuar.\n\n`;

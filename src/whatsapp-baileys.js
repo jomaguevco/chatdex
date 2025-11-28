@@ -537,40 +537,8 @@ class WhatsAppHandler {
       
       logger.info(`📱 [TEXTO] Procesando mensaje - Estado actual: ${currentState}`);
       
-      // VERIFICACIÓN PRIORITARIA: Si el usuario ya está autenticado y dice "si soy cliente"
-      const isAuthenticated = stateObj._authenticated === true || !!stateObj._user_token;
-      if (isAuthenticated) {
-        const textLower = text.toLowerCase()
-          .trim()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
-          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
-          .trim();
-        
-        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
-        const isYes = yesKeywords.some(keyword => {
-          const keywordLower = keyword.toLowerCase();
-          return textLower === keywordLower || 
-                 textLower.startsWith(keywordLower) || 
-                 textLower.includes(keywordLower) ||
-                 textLower.endsWith(keywordLower) ||
-                 (textLower.includes('si') && textLower.includes('cliente')) ||
-                 (textLower.includes('sí') && textLower.includes('cliente'));
-        });
-        
-        if (isYes) {
-          const clientName = stateObj._client_name || 'Cliente';
-          await this.sendMessage(jidToUse,
-            `✅ *Ya confirmamos que eres cliente registrado, *${clientName}*.* ✅\n\n` +
-            `🎯 *¿En qué podemos ayudarte?*\n\n` +
-            `🛍️ Ver catálogo: escribe *CATALOGO*\n` +
-            `🛒 Hacer pedido: escribe tu pedido\n` +
-            `📊 Ver mis pedidos: escribe *MIS PEDIDOS*\n` +
-            `❓ Ayuda: escribe *AYUDA*`
-          );
-          return;
-        }
-      }
+      // ELIMINADO: Verificación que mostraba "Ya confirmamos que eres cliente registrado" sin autenticación real
+      // Ahora el flujo correcto es: hacer pedido → mostrar factura/precio → pedir confirmación → luego autenticación
       
       // FLUJO 0: Si está esperando confirmación si es cliente registrado (ANTES de cancelación universal)
       if (currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION) {
@@ -2665,40 +2633,8 @@ class WhatsAppHandler {
       // Usar transcripción corregida para el resto del procesamiento
       transcription = transcriptionCorregida;
       
-      // VERIFICACIÓN PRIORITARIA: Si el usuario ya está autenticado y dice "si soy cliente"
-      const isAuthenticated = stateObj._authenticated === true || !!stateObj._user_token;
-      if (isAuthenticated) {
-        const transcriptionLower = transcription.toLowerCase()
-          .trim()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
-          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
-          .trim();
-        
-        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
-        const isYes = yesKeywords.some(keyword => {
-          const keywordLower = keyword.toLowerCase();
-          return transcriptionLower === keywordLower || 
-                 transcriptionLower.startsWith(keywordLower) || 
-                 transcriptionLower.includes(keywordLower) ||
-                 transcriptionLower.endsWith(keywordLower) ||
-                 (transcriptionLower.includes('si') && transcriptionLower.includes('cliente')) ||
-                 (transcriptionLower.includes('sí') && transcriptionLower.includes('cliente'));
-        });
-        
-        if (isYes) {
-          const clientName = stateObj._client_name || 'Cliente';
-          await this.sendMessage(jidToUse,
-            `✅ *Ya confirmamos que eres cliente registrado, *${clientName}*.* ✅\n\n` +
-            `🎯 *¿En qué podemos ayudarte?*\n\n` +
-            `🛍️ Ver catálogo: escribe *CATALOGO*\n` +
-            `🛒 Hacer pedido: escribe tu pedido\n` +
-            `📊 Ver mis pedidos: escribe *MIS PEDIDOS*\n` +
-            `❓ Ayuda: escribe *AYUDA*`
-          );
-          return;
-        }
-      }
+      // ELIMINADO: Verificación que mostraba "Ya confirmamos que eres cliente registrado" sin autenticación real
+      // Ahora el flujo correcto es: hacer pedido → mostrar factura/precio → pedir confirmación → luego autenticación
       
       // FLUJO 0.5: Si está esperando método de pago
       if (currentState === sessionManager.STATES.AWAITING_PAYMENT_METHOD) {
