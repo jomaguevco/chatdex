@@ -2083,19 +2083,27 @@ class WhatsAppHandler {
           return;
         }
         
-        // SIEMPRE preguntar primero si es cliente registrado cuando no está autenticado
-        // Esto debe ocurrir ANTES de procesar cualquier otro mensaje (incluyendo respuestas de NLU)
-        // No importa si NLU detectó algo o no, primero necesitamos saber si es cliente
-        await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION, {});
-        await this.sendMessage(jidToUse,
-          `👋 *¡Hola! ¡Bienvenido a KARDEX!* 👋\n\n` +
-          `❓ *¿Eres cliente registrado?*\n\n` +
-          `Responde:\n` +
-          `• *SÍ* si ya tienes una cuenta registrada\n` +
-          `• *NO* si no tienes cuenta\n\n` +
-          `💡 Esto nos ayudará a darte el mejor servicio.`
-        );
-        return;
+        // NO preguntar si es cliente registrado si hay un pedido en proceso
+        // El flujo correcto es: hacer pedido → mostrar factura/precio → pedir confirmación → luego autenticación
+        const hasActiveOrder = await sessionManager.getActiveOrderId(phoneNumber);
+        const isInOrderState = currentState === sessionManager.STATES.PEDIDO_EN_PROCESO || 
+                               currentState === sessionManager.STATES.AWAITING_CONFIRMATION ||
+                               currentState === sessionManager.STATES.ORDER_PENDING;
+        
+        if (!hasActiveOrder && !isInOrderState) {
+          // Solo preguntar si NO hay pedido en proceso
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION, {});
+          await this.sendMessage(jidToUse,
+            `👋 *¡Hola! ¡Bienvenido a KARDEX!* 👋\n\n` +
+            `❓ *¿Eres cliente registrado?*\n\n` +
+            `Responde:\n` +
+            `• *SÍ* si ya tienes una cuenta registrada\n` +
+            `• *NO* si no tienes cuenta\n\n` +
+            `💡 Esto nos ayudará a darte el mejor servicio.`
+          );
+          return;
+        }
+        // Si hay pedido en proceso, continuar con el flujo normal (no preguntar autenticación todavía)
       }
       
       // FLUJO 6.5: Si está esperando confirmación de cancelación
@@ -3542,18 +3550,27 @@ class WhatsAppHandler {
                          currentState !== sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION;
       
       if (needsInitialFlow) {
-        // SIEMPRE preguntar primero si es cliente registrado cuando no está autenticado
-        // Esto debe ocurrir ANTES de procesar cualquier otro mensaje (incluyendo voz)
-        await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION, {});
-        await this.sendMessage(jidToUse,
-          `👋 *¡Hola! ¡Bienvenido a KARDEX!* 👋\n\n` +
-          `❓ *¿Eres cliente registrado?*\n\n` +
-          `Responde:\n` +
-          `• *SÍ* si ya tienes una cuenta registrada\n` +
-          `• *NO* si no tienes cuenta\n\n` +
-          `💡 Esto nos ayudará a darte el mejor servicio.`
-        );
-        return;
+        // NO preguntar si es cliente registrado si hay un pedido en proceso
+        // El flujo correcto es: hacer pedido → mostrar factura/precio → pedir confirmación → luego autenticación
+        const hasActiveOrder = await sessionManager.getActiveOrderId(phoneNumber);
+        const isInOrderState = currentState === sessionManager.STATES.PEDIDO_EN_PROCESO || 
+                               currentState === sessionManager.STATES.AWAITING_CONFIRMATION ||
+                               currentState === sessionManager.STATES.ORDER_PENDING;
+        
+        if (!hasActiveOrder && !isInOrderState) {
+          // Solo preguntar si NO hay pedido en proceso
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION, {});
+          await this.sendMessage(jidToUse,
+            `👋 *¡Hola! ¡Bienvenido a KARDEX!* 👋\n\n` +
+            `❓ *¿Eres cliente registrado?*\n\n` +
+            `Responde:\n` +
+            `• *SÍ* si ya tienes una cuenta registrada\n` +
+            `• *NO* si no tienes cuenta\n\n` +
+            `💡 Esto nos ayudará a darte el mejor servicio.`
+          );
+          return;
+        }
+        // Si hay pedido en proceso, continuar con el flujo normal (no preguntar autenticación todavía)
       }
 
       // Obtener cliente según estado (importar si no están ya importados)

@@ -424,9 +424,10 @@ class OrderHandler {
       // Verificar si el usuario está autenticado
       const isAuthenticated = sessionState._authenticated || stateObj._authenticated || sessionState.user_token || stateObj._user_token;
       
-      // Si no está autenticado, pedir registro antes de confirmar
+      // Si no está autenticado, pedir autenticación DESPUÉS de que el usuario confirme el pedido
+      // El flujo correcto es: mostrar pedido → pedir confirmación → usuario confirma → pedir autenticación
       if (!isAuthenticated) {
-        logger.info('👤 Usuario no autenticado, solicitando registro antes de confirmar');
+        logger.info('👤 Usuario no autenticado, solicitando autenticación después de confirmación');
         
         // Obtener pedido_id desde la sesión activa para preservarlo
         let pedidoId = await sessionManager.getActiveOrderId(phoneNumber);
@@ -455,8 +456,10 @@ class OrderHandler {
           }
         );
         
+        // Mensaje mejorado: el usuario ya confirmó el pedido, ahora necesita autenticarse
         await whatsappHandler.sendMessage(
           phoneNumber,
+          '✅ *Pedido confirmado*\n\n' +
           '📦 *Para procesar tu pedido necesitamos verificar tu información*\n\n' +
           '❓ *¿Eres cliente registrado?*\n\n' +
           'Responde:\n' +
