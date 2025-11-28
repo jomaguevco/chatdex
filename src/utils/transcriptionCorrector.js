@@ -479,6 +479,10 @@ class TranscriptionCorrector {
       'conconfirmo': 'confirmo',
       'conconfirmar': 'confirmar',
       'conconfirma': 'confirma',
+      // Errores de "confirmar pedido"
+      'firmar pedido': 'confirmar pedido',
+      'firmar el pedido': 'confirmar el pedido',
+      'firmar': 'confirmar',
       
       // Errores de "pedido"
       'periodo': 'pedido',
@@ -542,6 +546,11 @@ class TranscriptionCorrector {
     corregida = corregida.replace(/\bpero hacer\b/gi, 'quiero hacer');
     corregida = corregida.replace(/\bpero pedir\b/gi, 'quiero pedir');
     corregida = corregida.replace(/\bpero comprar\b/gi, 'quiero comprar');
+    
+    // "Firmar pedido" -> "confirmar pedido" (error común de transcripción)
+    corregida = corregida.replace(/\bfirmar pedido\b/gi, 'confirmar pedido');
+    corregida = corregida.replace(/\bfirmar el pedido\b/gi, 'confirmar el pedido');
+    corregida = corregida.replace(/\bfirmar\b/gi, 'confirmar');
     
     // "a digas" -> "adidas" (cuando está al final de frase o seguido de otra palabra)
     corregida = corregida.replace(/\ba digas\b/gi, 'adidas');
