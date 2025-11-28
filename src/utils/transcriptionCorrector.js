@@ -508,7 +508,15 @@ class TranscriptionCorrector {
       'avidas': 'adidas',
       'galidas': 'adidas',
       'galida': 'adidas',
+      'a digas': 'adidas',
+      'adigas': 'adidas',
       'naik': 'nike',
+      
+      // Errores de "quiero"
+      'pero hacer': 'quiero hacer',
+      'pero': 'quiero',
+      'pero hacer un': 'quiero hacer un',
+      'pero hacer una': 'quiero hacer una',
       
       // Errores de métodos de pago
       'yapeo': 'yape',
@@ -527,7 +535,19 @@ class TranscriptionCorrector {
       }
     }
     
-    // 3. Separar palabras pegadas comunes (solo si existe el patrón)
+    // 3. Correcciones específicas para frases completas comunes
+    // "Pero hacer un pedido" -> "quiero hacer un pedido"
+    corregida = corregida.replace(/\bpero hacer un\b/gi, 'quiero hacer un');
+    corregida = corregida.replace(/\bpero hacer una\b/gi, 'quiero hacer una');
+    corregida = corregida.replace(/\bpero hacer\b/gi, 'quiero hacer');
+    corregida = corregida.replace(/\bpero pedir\b/gi, 'quiero pedir');
+    corregida = corregida.replace(/\bpero comprar\b/gi, 'quiero comprar');
+    
+    // "a digas" -> "adidas" (cuando está al final de frase o seguido de otra palabra)
+    corregida = corregida.replace(/\ba digas\b/gi, 'adidas');
+    corregida = corregida.replace(/\badigas\b/gi, 'adidas');
+    
+    // Separar palabras pegadas comunes (solo si existe el patrón)
     corregida = corregida.replace(/\b(balóno|balono|balón)(SoyCliente|soyCliente|Soy|soy|Cliente|cliente)\b/gi, 'balón soy cliente');
     
     // 4. Normalizar espacios múltiples (siempre seguro)

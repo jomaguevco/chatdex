@@ -782,23 +782,34 @@ ${pedido.observaciones ? `📝 Observaciones: ${pedido.observaciones}` : ''}
     try {
       logger.info('📄 Creando venta/factura en KARDEX', { cliente_id: ventaData.cliente_id });
       
-      const response = await this.client.post('/ventas', {
-        cliente_id: ventaData.cliente_id,
+      // Limpiar datos para evitar referencias circulares
+      const detallesLimpios = ventaData.detalles.map(detalle => ({
+        producto_id: Number(detalle.producto_id),
+        cantidad: Number(detalle.cantidad),
+        precio_unitario: Number(detalle.precio_unitario),
+        subtotal: Number(detalle.cantidad * detalle.precio_unitario)
+      }));
+      
+      const ventaPayload = {
+        cliente_id: Number(ventaData.cliente_id),
         fecha_venta: ventaData.fecha_venta || new Date().toISOString(),
-        subtotal: ventaData.subtotal || ventaData.total,
-        descuento: ventaData.descuento || 0,
-        impuestos: ventaData.impuestos || 0,
-        total: ventaData.total,
+        subtotal: Number(ventaData.subtotal || ventaData.total),
+        descuento: Number(ventaData.descuento || 0),
+        impuestos: Number(ventaData.impuestos || 0),
+        total: Number(ventaData.total),
         metodo_pago: ventaData.metodo_pago || 'TRANSFERENCIA',
         estado: 'PROCESADA',
-        observaciones: ventaData.observaciones || `Pedido desde WhatsApp - ${ventaData.telefono}`,
-        detalles: ventaData.detalles.map(detalle => ({
-          producto_id: detalle.producto_id,
-          cantidad: detalle.cantidad,
-          precio_unitario: detalle.precio_unitario,
-          subtotal: detalle.cantidad * detalle.precio_unitario
-        }))
+        observaciones: String(ventaData.observaciones || `Pedido desde WhatsApp - ${ventaData.telefono || ''}`),
+        detalles: detallesLimpios
+      };
+      
+      logger.debug('📤 Enviando datos de venta', {
+        cliente_id: ventaPayload.cliente_id,
+        total: ventaPayload.total,
+        detalles_count: ventaPayload.detalles.length
       });
+      
+      const response = await this.client.post('/ventas', ventaPayload);
       
       if (response.data && response.data.success) {
         const venta = response.data.data;
@@ -813,10 +824,20 @@ ${pedido.observaciones ? `📝 Observaciones: ${pedido.observaciones}` : ''}
       
       throw new Error('No se pudo crear la venta');
     } catch (error) {
-      logger.error('Error al crear venta', error);
+      // Evitar loguear objetos circulares
+      const errorMessage = error.response?.data?.message || error.message || 'Error desconocido';
+      const errorStatus = error.response?.status;
+      
+      logger.error('Error al crear venta', {
+        error: errorMessage,
+        status: errorStatus,
+        cliente_id: ventaData.cliente_id,
+        total: ventaData.total
+      });
+      
       return {
         success: false,
-        error: error.response?.data?.message || error.message
+        error: errorMessage
       };
     }
   }
