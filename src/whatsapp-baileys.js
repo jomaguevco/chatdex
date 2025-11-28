@@ -2871,7 +2871,26 @@ class WhatsAppHandler {
               if (stock > 0) {
                 // Iniciar flujo de pedido
                 const orderHandler = require('./orderHandler');
-                const cantidad = 1; // Por defecto 1, el usuario puede cambiar después
+                const kardexApi = require('./kardexApi');
+                const cantidad = 1; // Por defecto 1 cuando dice "un balón"
+                
+                // Si hay un pedido en proceso, cancelarlo primero para crear uno nuevo
+                // Cuando el usuario dice "quiero hacer un pedido", quiere un pedido nuevo
+                const pedidoIdExistente = await sessionManager.getActiveOrderId(phoneNumber);
+                if (pedidoIdExistente) {
+                  logger.info(`🔄 Cancelando pedido anterior ${pedidoIdExistente} para crear uno nuevo`);
+                  try {
+                    await kardexApi.cancelarPedidoEnProceso(pedidoIdExistente);
+                    // Limpiar pedido activo de la sesión
+                    await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+                      pedido_id: undefined,
+                      _pedido_id: undefined,
+                      numero_pedido: undefined
+                    });
+                  } catch (cancelError) {
+                    logger.warn('No se pudo cancelar pedido anterior, continuando...', cancelError);
+                  }
+                }
                 
                 // Agregar producto al pedido (addProductToOrder ya maneja los mensajes)
                 const result = await orderHandler.addProductToOrder(
