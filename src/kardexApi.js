@@ -35,6 +35,53 @@ class KardexAPI {
   /**
    * Obtener cliente por teléfono
    */
+  async getClientById(clientId) {
+    try {
+      logger.info(`🔍 API: Buscando cliente por ID: ${clientId}`);
+      
+      // Usar token del chatbot si está disponible
+      const token = config.kardexApi.chatbotToken || process.env.CHATBOT_API_TOKEN || '';
+      const headers = token ? { 'x-chatbot-token': token } : {};
+      
+      const res = await this.client.get(`/clientes/${clientId}`, { headers }).catch((error) => {
+        logger.warn(`⚠️ Error al buscar cliente por ID: ${error.response?.status} - ${error.response?.data?.message || error.message}`);
+        return null;
+      });
+      
+      if (res && res.data && res.data.success && res.data.data) {
+        logger.info(`✅ API: Cliente encontrado por ID: ${res.data.data.nombre}`);
+        return res.data.data;
+      }
+      
+      // Si falla con autenticación, intentar buscar directamente desde la BD
+      logger.info(`⚠️ API: No se encontró cliente con ID ${clientId} por API, intentando BD directa...`);
+      try {
+        const kardexDb = require('./kardexDb');
+        if (kardexDb.isConnected()) {
+          const pool = kardexDb.getPool();
+          if (pool) {
+            const [rows] = await pool.execute(
+              'SELECT id, nombre, email, telefono, numero_documento, tipo_documento, direccion, activo FROM clientes WHERE id = ?',
+              [clientId]
+            );
+            if (rows && rows.length > 0) {
+              logger.info(`✅ Cliente encontrado por ID desde BD directa: ${rows[0].nombre}`);
+              return rows[0];
+            }
+          }
+        }
+      } catch (dbError) {
+        logger.warn(`⚠️ Error al buscar cliente en BD directa: ${dbError.message}`);
+      }
+      
+      logger.warn(`⚠️ API: No se encontró cliente con ID: ${clientId}`);
+      return null;
+    } catch (error) {
+      logger.error('Error al obtener cliente por ID', error);
+      return null;
+    }
+  }
+
   async getClientByPhone(phone) {
     try {
       // Normalizar número (eliminar caracteres no numéricos)
@@ -103,75 +150,249 @@ class KardexAPI {
   /**
    * Verificar contraseña del cliente por teléfono
    */
-  async verifyClientPassword(telefono, contrasena) {
+  async verifyClientPassword(telefono, contrasena, clientId = null) {
     try {
-      logger.info(`🔐 Verificando contraseña para teléfono: ${telefono}`);
+      console.log('══════════════════════════════════════════════════════════════════════');
+      console.log('🔐 INICIANDO VERIFICACIÓN DE CONTRASEÑA');
+      console.log(`📞 Teléfono recibido: ${telefono}`);
+      console.log(`🔑 Contraseña recibida: "${contrasena}"`);
+      console.log(`🆔 Client ID recibido: ${clientId || 'NO PROPORCIONADO'}`);
+      console.log('══════════════════════════════════════════════════════════════════════');
       
-      // Normalizar número
-      const numero = (telefono || '').toString().replace(/[^0-9]/g, '');
+      logger.info(`🔐 Verificando contraseña para teléfono: ${telefono}, contraseña recibida: "${contrasena}", clientId: ${clientId || 'NO PROPORCIONADO'}`);
       
-      // Buscar cliente por teléfono primero
-      const cliente = await this.getClientByPhone(numero);
-      if (!cliente) {
-        logger.warn(`⚠️ Cliente no encontrado para ${telefono}`);
-        return { success: false, message: 'Cliente no encontrado' };
+      let cliente = null;
+      
+      // PRIORIDAD 1: Si tenemos clientId, usarlo directamente
+      if (clientId) {
+        console.log(`🔍 [PRIORIDAD] Buscando cliente por ID: ${clientId}`);
+        logger.info(`🔐 [PRIORIDAD] Buscando cliente por ID: ${clientId}`);
+        try {
+          cliente = await this.getClientById(clientId);
+          if (cliente) {
+            console.log(`✅ Cliente encontrado por ID: ${cliente.nombre}`);
+            logger.info(`✅ Cliente encontrado por ID: ${cliente.nombre}`);
+          } else {
+            console.log(`⚠️ Cliente con ID ${clientId} no encontrado, intentando por teléfono...`);
+            logger.warn(`⚠️ Cliente con ID ${clientId} no encontrado, intentando por teléfono...`);
+          }
+        } catch (error) {
+          console.log(`⚠️ Error al buscar cliente por ID: ${error.message}`);
+          logger.warn(`⚠️ Error al buscar cliente por ID: ${error.message}`);
+        }
       }
       
-      // Buscar usuario asociado al cliente
-      // El usuario puede tener nombre_usuario como "cliente_${dni}" o el email
-      const nombreUsuario = cliente.email || `cliente_${cliente.numero_documento}`;
-      
-      // Intentar login con el nombre_usuario y contraseña
-      try {
-        const crypto = require('crypto');
-        const hashedPassword = crypto.createHash('sha256').update(contrasena).digest('hex');
+      // PRIORIDAD 2: Si no encontramos por ID, buscar por teléfono
+      if (!cliente) {
+        // Normalizar número
+        const numero = (telefono || '').toString().replace(/[^0-9]/g, '');
+        console.log(`📞 Número normalizado: ${numero}`);
         
-        const res = await this.client.post('/auth/login', {
-          nombre_usuario: nombreUsuario,
-          contrasena: contrasena // El backend hasheará la contraseña
-        });
-        
-        if (res.data && res.data.success && res.data.data) {
-          logger.success(`✅ Contraseña verificada correctamente`);
-          return {
-            success: true,
-            user: res.data.data.user,
-            token: res.data.data.token,
-            cliente: cliente
-          };
+        // Buscar cliente por teléfono
+        console.log(`🔍 Buscando cliente con número: ${numero}`);
+        cliente = await this.getClientByPhone(numero);
+        if (!cliente) {
+          console.log(`❌ Cliente NO encontrado para ${telefono}`);
+          logger.warn(`⚠️ Cliente no encontrado para ${telefono}`);
+          return { success: false, message: 'Cliente no encontrado' };
         }
-      } catch (loginError) {
-        // Si el login falla, puede ser porque el nombre_usuario es diferente
-        // Intentar con el email si existe
-        if (cliente.email && cliente.email !== nombreUsuario) {
-          try {
-            const res = await this.client.post('/auth/login', {
-              nombre_usuario: cliente.email,
-              contrasena: contrasena
-            });
-            
-            if (res.data && res.data.success && res.data.data) {
-              logger.success(`✅ Contraseña verificada correctamente (con email)`);
-              return {
-                success: true,
-                user: res.data.data.user,
-                token: res.data.data.token,
-                cliente: cliente
-              };
+      }
+      
+      console.log(`\n✅ ✅ ✅ Cliente encontrado:`);
+      console.log(`   - Nombre: ${cliente.nombre}`);
+      console.log(`   - Email: ${cliente.email || 'NO TIENE'}`);
+      console.log(`   - DNI: ${cliente.numero_documento || 'NO TIENE'}`);
+      console.log(`   - DNI (tipo): ${typeof cliente.numero_documento}`);
+      console.log(`   - DNI (limpio): ${String(cliente.numero_documento || '').trim()}`);
+      console.log(`   - ID: ${cliente.id}`);
+      console.log(`   - Teléfono: ${cliente.telefono || 'NO TIENE'}`);
+      
+      logger.info(`🔐 Cliente encontrado: ${cliente.nombre}, email: ${cliente.email}, DNI: ${cliente.numero_documento}`);
+      logger.info(`🔐 [DEBUG] Cliente completo: ${JSON.stringify({ id: cliente.id, nombre: cliente.nombre, email: cliente.email, dni: cliente.numero_documento, telefono: cliente.telefono })}`);
+      
+      // Intentar diferentes variantes del nombre_usuario
+      // PRIORIDAD: cliente_${dni} es el formato estándar usado en el registro
+      const posiblesUsuarios = [];
+      
+      // 1. cliente_${dni} - FORMATO ESTÁNDAR (PRIORIDAD MÁXIMA)
+      if (cliente.numero_documento) {
+        // Limpiar DNI: eliminar espacios, guiones, puntos, etc.
+        const dniLimpio = String(cliente.numero_documento).trim().replace(/[\s\-\.]/g, '');
+        const nombreUsuarioEstandar = `cliente_${dniLimpio}`;
+        posiblesUsuarios.push(nombreUsuarioEstandar);
+        console.log(`\n🔐 [PRIORIDAD] Agregando formato estándar: "${nombreUsuarioEstandar}"`);
+        console.log(`   DNI original: "${cliente.numero_documento}"`);
+        console.log(`   DNI limpio: "${dniLimpio}"`);
+        logger.info(`🔐 [PRIORIDAD] Agregando formato estándar: "${nombreUsuarioEstandar}" (DNI original: "${cliente.numero_documento}")`);
+      } else {
+        console.log(`\n⚠️ ⚠️ ⚠️ CLIENTE NO TIENE DNI - NO PODREMOS HACER LOGIN`);
+        logger.warn(`⚠️ Cliente ${cliente.nombre} no tiene número_documento`);
+      }
+      
+      // 2. Email si existe
+      if (cliente.email) {
+        posiblesUsuarios.push(cliente.email);
+      }
+      
+      // 3. Solo el DNI (limpio)
+      if (cliente.numero_documento) {
+        const dniLimpio = String(cliente.numero_documento).trim().replace(/[\s\-\.]/g, '');
+        posiblesUsuarios.push(dniLimpio);
+      }
+      
+      // 4. Nombre del cliente (si se usa como usuario)
+      if (cliente.nombre) {
+        const nombreLimpio = cliente.nombre.toLowerCase().replace(/\s+/g, '_');
+        posiblesUsuarios.push(nombreLimpio);
+      }
+      
+      console.log(`🔐 Intentando login con posibles usuarios: ${posiblesUsuarios.join(', ')}`);
+      logger.info(`🔐 Intentando login con posibles usuarios: ${posiblesUsuarios.join(', ')}`);
+      
+      // Intentar login con cada variante
+      for (const nombreUsuario of posiblesUsuarios) {
+        try {
+          console.log(`\n🔄 Intentando login con nombre_usuario: "${nombreUsuario}"`);
+          console.log(`   Contraseña: "${contrasena}"`);
+          logger.info(`🔐 Intentando login con nombre_usuario: "${nombreUsuario}"`);
+          
+          const res = await this.client.post('/auth/login', {
+            nombre_usuario: nombreUsuario,
+            contrasena: contrasena // El backend hasheará la contraseña
+          });
+          
+          console.log(`   ✅ Respuesta del backend recibida`);
+          console.log(`   ✅ Success: ${res.data?.success}`);
+          console.log(`   ✅ Has data: ${!!res.data?.data}`);
+          console.log(`   ✅ Has user: ${!!res.data?.data?.user}`);
+          console.log(`   ✅ Has token: ${!!res.data?.data?.token}`);
+          logger.info(`🔐 Respuesta del backend: success=${res.data?.success}, hasUser=${!!res.data?.data?.user}, hasToken=${!!res.data?.data?.token}`);
+          
+          if (res.data && res.data.success && res.data.data) {
+            console.log(`\n✅ ✅ ✅ LOGIN EXITOSO con usuario: "${nombreUsuario}"`);
+            console.log(`✅ Usuario autenticado: ${res.data.data.user?.nombre_completo || res.data.data.user?.nombre_usuario}`);
+            logger.success(`✅ Contraseña verificada correctamente con usuario: "${nombreUsuario}"`);
+            return {
+              success: true,
+              user: res.data.data.user,
+              token: res.data.data.token,
+              cliente: cliente
+            };
+          } else {
+            console.log(`   ⚠️ Respuesta no exitosa del backend`);
+            console.log(`   ⚠️ Data completa:`, JSON.stringify(res.data, null, 2));
+            logger.warn(`⚠️ Respuesta no exitosa del backend: ${JSON.stringify(res.data)}`);
+          }
+        } catch (loginError) {
+          const errorMsg = loginError.response?.data?.message || loginError.message;
+          const statusCode = loginError.response?.status;
+          const errorData = loginError.response?.data;
+          
+          console.log(`\n   ❌ ❌ ❌ Login falló con "${nombreUsuario}":`);
+          console.log(`      Status Code: ${statusCode}`);
+          console.log(`      Error Message: ${errorMsg}`);
+          console.log(`      Error Data completo:`, JSON.stringify(errorData, null, 2));
+          console.log(`      Request URL: ${loginError.config?.url}`);
+          console.log(`      Request Data:`, JSON.stringify(loginError.config?.data, null, 2));
+          
+          logger.error(`❌ Login falló con "${nombreUsuario}": Status=${statusCode}, Error=${errorMsg}`);
+          logger.error(`❌ Error completo:`, JSON.stringify(errorData, null, 2));
+          
+          // Continuar con el siguiente usuario
+          continue;
+        }
+      }
+      
+      // Si ninguno funcionó, buscar otros clientes con el mismo número de teléfono
+      console.log(`\n❌ ❌ ❌ NO SE PUDO VERIFICAR LA CONTRASEÑA CON NINGUNA VARIANTE`);
+      console.log(`   Se intentaron ${posiblesUsuarios.length} variantes: ${posiblesUsuarios.join(', ')}`);
+      logger.warn(`⚠️ No se pudo verificar la contraseña con ninguna variante de usuario`);
+      
+      // Buscar otros clientes con el mismo número de teléfono
+      console.log(`\n🔍 Buscando otros clientes con el mismo número de teléfono: ${telefono}`);
+      logger.info(`🔍 Buscando otros clientes con el mismo número de teléfono: ${telefono}`);
+      
+      try {
+        const kardexDb = require('./kardexDb');
+        const todosLosClientes = await kardexDb.buscarTodosLosClientesPorTelefono(telefono);
+        
+        if (todosLosClientes && todosLosClientes.length > 1) {
+          console.log(`✅ Encontrados ${todosLosClientes.length} clientes con el mismo número`);
+          logger.info(`✅ Encontrados ${todosLosClientes.length} clientes con el mismo número`);
+          
+          // Probar con cada cliente (excluyendo el que ya probamos)
+          for (const otroCliente of todosLosClientes) {
+            if (otroCliente.id === cliente.id) {
+              continue; // Saltar el cliente que ya probamos
             }
-          } catch (emailLoginError) {
-            // Continuar con el error original
+            
+            console.log(`\n🔄 Probando con otro cliente: ${otroCliente.nombre} (ID: ${otroCliente.id})`);
+            logger.info(`🔄 Probando con otro cliente: ${otroCliente.nombre} (ID: ${otroCliente.id})`);
+            
+            // Intentar diferentes variantes del nombre_usuario para este cliente
+            const otrosPosiblesUsuarios = [];
+            
+            // 1. cliente_${dni} - FORMATO ESTÁNDAR
+            if (otroCliente.numero_documento) {
+              const dniLimpio = String(otroCliente.numero_documento).trim().replace(/[\s\-\.]/g, '');
+              otrosPosiblesUsuarios.push(`cliente_${dniLimpio}`);
+            }
+            
+            // 2. Email si existe
+            if (otroCliente.email) {
+              otrosPosiblesUsuarios.push(otroCliente.email);
+            }
+            
+            // 3. Solo el DNI
+            if (otroCliente.numero_documento) {
+              const dniLimpio = String(otroCliente.numero_documento).trim().replace(/[\s\-\.]/g, '');
+              otrosPosiblesUsuarios.push(dniLimpio);
+            }
+            
+            // 4. Nombre del cliente
+            if (otroCliente.nombre) {
+              const nombreLimpio = otroCliente.nombre.toLowerCase().replace(/\s+/g, '_');
+              otrosPosiblesUsuarios.push(nombreLimpio);
+            }
+            
+            // Intentar login con cada variante
+            for (const nombreUsuario of otrosPosiblesUsuarios) {
+              try {
+                console.log(`   🔄 Intentando login con: "${nombreUsuario}"`);
+                logger.info(`🔐 Intentando login con nombre_usuario: "${nombreUsuario}"`);
+                
+                const res = await this.client.post('/auth/login', {
+                  nombre_usuario: nombreUsuario,
+                  contrasena: contrasena
+                });
+                
+                if (res.data && res.data.success && res.data.data) {
+                  console.log(`\n✅ ✅ ✅ LOGIN EXITOSO con otro cliente: ${otroCliente.nombre}`);
+                  console.log(`✅ Usuario autenticado: ${res.data.data.user?.nombre_completo || res.data.data.user?.nombre_usuario}`);
+                  logger.success(`✅ Contraseña verificada correctamente con otro cliente: ${otroCliente.nombre} (usuario: "${nombreUsuario}")`);
+                  return {
+                    success: true,
+                    user: res.data.data.user,
+                    token: res.data.data.token,
+                    cliente: otroCliente
+                  };
+                }
+              } catch (loginError) {
+                // Continuar con el siguiente usuario
+                continue;
+              }
+            }
           }
         }
-        
-        logger.warn(`⚠️ Contraseña incorrecta o error en login: ${loginError.response?.data?.message || loginError.message}`);
-        return {
-          success: false,
-          message: loginError.response?.data?.message || 'Contraseña incorrecta'
-        };
+      } catch (searchError) {
+        logger.error('Error al buscar otros clientes con el mismo número', searchError);
       }
       
-      return { success: false, message: 'Error al verificar contraseña' };
+      // Si ninguno funcionó, retornar error
+      return {
+        success: false,
+        message: 'Contraseña incorrecta'
+      };
     } catch (error) {
       logger.error('Error al verificar contraseña del cliente', error);
       return {
@@ -284,7 +505,36 @@ class KardexAPI {
   async getProducto(id) {
     try {
       logger.debug(`Obteniendo producto ${id}`);
-      const response = await this.client.get(`/productos/${id}`);
+      
+      // Primero intentar desde BD directa (más rápido y sin autenticación)
+      const kardexDb = require('./kardexDb');
+      if (kardexDb.isConnected()) {
+        try {
+          const productos = await kardexDb.buscarProductos(id.toString(), 1);
+          // Buscar el producto exacto por ID
+          const pool = kardexDb.getPool();
+          if (pool) {
+            const [rows] = await pool.execute(
+              'SELECT id, nombre, codigo_interno, codigo_barras, descripcion, precio_venta, stock_actual, activo, categoria_id FROM productos WHERE id = ?',
+              [id]
+            );
+            if (rows && rows.length > 0) {
+              logger.debug(`✅ Producto ${id} obtenido de BD directa`);
+              return rows[0];
+            }
+          }
+        } catch (dbError) {
+          logger.warn('Error al obtener producto de BD directa', dbError.message);
+        }
+      }
+      
+      // Fallback a API con token del chatbot
+      const token = config.kardexApi.chatbotToken || process.env.CHATBOT_API_TOKEN || '';
+      const response = await this.client.get(`/productos/${id}`, {
+        headers: {
+          'x-chatbot-token': token
+        }
+      });
       
       if (response.data && response.data.success) {
         return response.data.data;
@@ -292,7 +542,7 @@ class KardexAPI {
       
       return null;
     } catch (error) {
-      logger.error(`Error al obtener producto ${id}`, error);
+      logger.error(`Error al obtener producto ${id}`, error.message);
       return null;
     }
   }
@@ -667,10 +917,12 @@ ${pedido.observaciones ? `📝 Observaciones: ${pedido.observaciones}` : ''}
       
       throw new Error('No se pudo crear el pedido vacío');
     } catch (error) {
-      logger.error('Error al crear pedido vacío', error);
+      const errorMsg = error.response?.data?.message || error.message || 'Error desconocido';
+      const statusCode = error.response?.status || 'N/A';
+      logger.error(`Error al crear pedido vacío: ${errorMsg} (Status: ${statusCode})`);
       return {
         success: false,
-        error: error.response?.data?.message || error.message
+        error: errorMsg
       };
     }
   }

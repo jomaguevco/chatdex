@@ -61,9 +61,12 @@ class OrderHandler {
   /**
    * Agregar producto al pedido en proceso
    */
-  async addProductToOrder(phoneNumber, productoId, cantidad, productoNombre, whatsappHandler) {
+  async addProductToOrder(phoneNumber, productoId, cantidad, productoNombre, whatsappHandler, jidToUse = null) {
     try {
       logger.info(`➕ Agregando producto al pedido: ${productoNombre} x${cantidad}`);
+
+      // Usar JID si está disponible, de lo contrario usar phoneNumber
+      const jidForMessage = jidToUse || phoneNumber;
 
       // Obtener pedido activo
       const pedidoId = await sessionManager.getActiveOrderId(phoneNumber);
@@ -74,7 +77,7 @@ class OrderHandler {
         if (!nuevoPedido) {
           return null;
         }
-        return await this.addProductToOrder(phoneNumber, productoId, cantidad, productoNombre, whatsappHandler);
+        return await this.addProductToOrder(phoneNumber, productoId, cantidad, productoNombre, whatsappHandler, jidToUse);
       }
 
       // Agregar producto al pedido en BD
@@ -83,7 +86,7 @@ class OrderHandler {
       if (!result.success) {
         logger.error('Error al agregar producto:', result.error);
         await whatsappHandler.sendMessage(
-          phoneNumber,
+          jidForMessage,
           `❌ ${result.error || 'No se pudo agregar el producto al pedido.'}`
         );
         return null;
@@ -112,15 +115,16 @@ class OrderHandler {
 
       // Mostrar resumen actualizado
       const resumen = this.generateOrderSummaryFromBD(pedidoActualizado);
-      await whatsappHandler.sendMessage(phoneNumber, resumen);
+      await whatsappHandler.sendMessage(jidForMessage, resumen);
 
       logger.success(`✅ Producto agregado: ${productoNombre} x${cantidad}`);
       
       return result;
     } catch (error) {
       logger.error('Error al agregar producto al pedido', error);
+      const jidForMessage = jidToUse || phoneNumber;
       await whatsappHandler.sendMessage(
-        phoneNumber,
+        jidForMessage,
         '❌ Hubo un error al agregar el producto. Por favor, intenta nuevamente.'
       );
       return null;
@@ -135,7 +139,7 @@ class OrderHandler {
       return '📦 *Tu pedido está vacío*\n\nAgrega productos escribiendo sus nombres.';
     }
 
-    let resumen = `📦 *Pedido ${pedido.numero_pedido}*\n\n`;
+    let resumen = `🛒 *Pedido iniciado - ${pedido.numero_pedido}*\n\n`;
     
     pedido.detalles.forEach((detalle, index) => {
       const producto = detalle.producto || {};
@@ -146,10 +150,11 @@ class OrderHandler {
 
     resumen += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
     resumen += `💰 *Total: S/. ${parseFloat(pedido.total).toFixed(2)}*\n\n`;
-    resumen += `💬 *Comandos:*\n`;
+    resumen += `💬 *¿Confirmas este pedido?*\n`;
+    resumen += `Responde *CONFIRMO* para continuar.\n\n`;
+    resumen += `*Otros comandos:*\n`;
     resumen += `• "VER PEDIDO" - Ver resumen\n`;
     resumen += `• "ELIMINAR [producto]" - Quitar producto\n`;
-    resumen += `• "CONFIRMAR" - Finalizar pedido\n`;
     resumen += `• "CANCELAR" - Cancelar pedido`;
 
     return resumen;
@@ -411,22 +416,69 @@ class OrderHandler {
       logger.info(`✅ Confirmando pedido para ${phoneNumber}`);
 
       const session = await sessionManager.getSession(phoneNumber);
-
-      if (!session.current_order) {
+      const stateObj = session.current_order ? JSON.parse(session.current_order) : {};
+      
+      // Verificar si el usuario está autenticado
+      const isAuthenticated = sessionState._authenticated || stateObj._authenticated || sessionState.user_token || stateObj._user_token;
+      
+      // Si no está autenticado, pedir registro antes de confirmar
+      if (!isAuthenticated) {
+        logger.info('👤 Usuario no autenticado, solicitando registro antes de confirmar');
+        
+        // Obtener pedido_id desde la sesión activa para preservarlo
+        let pedidoId = await sessionManager.getActiveOrderId(phoneNumber);
+        if (!pedidoId && sessionState.pedido_id) {
+          pedidoId = sessionState.pedido_id;
+        }
+        if (!pedidoId && stateObj.pedido_id) {
+          pedidoId = stateObj.pedido_id;
+        }
+        if (!pedidoId && stateObj._pedido_id) {
+          pedidoId = stateObj._pedido_id;
+        }
+        
+        logger.info(`📦 Preservando pedido_id durante autenticación: ${pedidoId || 'NO ENCONTRADO'}`);
+        
+        // Guardar que está esperando confirmación después de autenticarse, preservando el pedido_id
+        await sessionManager.updateSessionState(
+          phoneNumber,
+          sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION,
+          {
+            ...stateObj,
+            _pending_confirm: true,
+            _return_to_confirm: true,
+            pedido_id: pedidoId,
+            _pedido_id: pedidoId
+          }
+        );
+        
         await whatsappHandler.sendMessage(
           phoneNumber,
-          '❌ No tienes ningún pedido pendiente para confirmar.'
+          '📦 *Para procesar tu pedido necesitamos verificar tu información*\n\n' +
+          '❓ *¿Eres cliente registrado?*\n\n' +
+          'Responde:\n' +
+          '• *SÍ* si ya tienes una cuenta registrada\n' +
+          '• *NO* si no tienes cuenta\n\n' +
+          '💡 Esto nos ayudará a procesar tu pedido correctamente.'
         );
         return;
       }
-
+      
       // Obtener pedido desde BD
-      const pedidoId = await sessionManager.getActiveOrderId(phoneNumber);
+      let pedidoId = await sessionManager.getActiveOrderId(phoneNumber);
+      
+      // Si no hay pedido en sesión, buscar si hay pedido_id en sessionState
+      if (!pedidoId && sessionState.pedido_id) {
+        pedidoId = sessionState.pedido_id;
+        logger.info(`📦 Usando pedido_id de sessionState: ${pedidoId}`);
+      }
       
       if (!pedidoId) {
+        logger.warn(`⚠️ No se encontró pedido activo para ${phoneNumber}`);
         await whatsappHandler.sendMessage(
           phoneNumber,
-          '❌ No tienes un pedido activo para confirmar.'
+          '❌ No tienes un pedido activo para confirmar.\n\n' +
+          '💡 Para hacer un pedido, escribe el nombre del producto que deseas o envíalo por voz.'
         );
         return;
       }

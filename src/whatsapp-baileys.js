@@ -237,7 +237,13 @@ class WhatsAppHandler {
           return;
         }
 
-        logger.info(`✅ Procesando ${messages.length} mensaje(s)...`);
+        logger.info(`✅ Procesando ${messages.length} mensaje(s)... (tipo: ${type})`);
+        
+        // Log detallado para debug del primer audio
+        if (messages.length > 0) {
+          const firstMsg = messages[0];
+          logger.info(`🔍 Primer mensaje - fromMe: ${firstMsg.key?.fromMe}, remoteJid: ${firstMsg.key?.remoteJid}, tipo: ${firstMsg.message ? Object.keys(firstMsg.message)[0] : 'unknown'}`);
+        }
 
         for (const message of messages) {
           try {
@@ -247,27 +253,36 @@ class WhatsAppHandler {
               continue;
             }
 
-            // Ignorar mensajes de grupos
-            if (message.key.remoteJid?.includes('@g.us')) {
+            // Verificar si es mensaje de grupo
+            const isGroup = message.key.remoteJid?.includes('@g.us');
+            
+            if (isGroup) {
               logger.debug('⚠️ Ignorando mensaje de grupo');
               continue;
             }
 
-            // Log visible
+            // Log detallado para mensajes individuales
+            logger.info('═══════════════════════════════════════════════════════════');
+            logger.info('📩 ========== MENSAJE INDIVIDUAL RECIBIDO ==========');
+            logger.info(`📩 HORA: ${new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' })}`);
+            logger.info(`📩 FROM: ${message.key.remoteJid || 'N/A'}`);
+            logger.info(`📩 FROM ME: ${message.key.fromMe ? 'SÍ' : 'NO'}`);
+            logger.info(`📩 IS GROUP: NO (mensaje individual)`);
+            logger.info(`📩 TYPE: ${message.message ? Object.keys(message.message)[0] : 'text'}`);
+            logger.info('═══════════════════════════════════════════════════════════');
+            
+            // Log visible en consola
             console.log('\n');
             console.log('═'.repeat(70));
-            console.log('📩 ========== MENSAJE RECIBIDO ==========');
+            console.log('📩 ========== MENSAJE INDIVIDUAL RECIBIDO ==========');
             console.log('═'.repeat(70));
             console.log('📩 HORA: ' + new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' }));
             console.log('📩 FROM: ' + (message.key.remoteJid || 'N/A'));
             console.log('📩 FROM ME: ' + (message.key.fromMe ? 'SÍ' : 'NO'));
-            console.log('📩 IS GROUP: ' + (message.key.remoteJid?.includes('@g.us') ? 'SÍ' : 'NO'));
+            console.log('📩 IS GROUP: NO (mensaje individual)');
             console.log('📩 TYPE: ' + (message.message ? Object.keys(message.message)[0] : 'text'));
             console.log('═'.repeat(70));
             console.log('\n');
-
-            logger.info('📩 ========== MENSAJE RECIBIDO ==========');
-            logger.info('📩 HORA: ' + new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' }));
 
             // Extraer número de teléfono usando Baileys
             let phoneNumber = null;
@@ -446,7 +461,20 @@ class WhatsAppHandler {
                 });
                 // Guardar el remoteJid original para usar en respuestas
                 // Pasar phoneForSearch para buscar en BD y phoneNumber para sesión
-                await this.processVoiceMessageBaileys(phoneForSearch, audioMessage, remoteJid);
+                try {
+                  await this.processVoiceMessageBaileys(phoneForSearch, audioMessage, remoteJid);
+                } catch (voiceError) {
+                  logger.error('❌ Error al procesar mensaje de voz:', {
+                    error: voiceError.message,
+                    stack: voiceError.stack,
+                    phoneNumber: phoneForSearch
+                  });
+                  // Enviar mensaje de error al usuario
+                  await this.sendMessage(remoteJid || `${phoneForSearch}@s.whatsapp.net`,
+                    '😅 Lo siento, hubo un error al procesar tu mensaje de voz.\n\n' +
+                    '💡 Por favor, intenta enviarlo nuevamente o escribe tu mensaje.'
+                  );
+                }
               } else {
                 logger.warn('⚠️ Audio message object es null o undefined');
               }
@@ -480,25 +508,68 @@ class WhatsAppHandler {
    * Procesar mensaje de texto
    */
   async processTextMessage(phoneNumber, text, remoteJid = null) {
+    const jidToUse = remoteJid || (phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`);
+    
+    // Log detallado al inicio
+    logger.info('═══════════════════════════════════════════════════════════');
+    logger.info('📝 [TEXTO] Iniciando procesamiento de mensaje de texto');
+    logger.info(`📝 [TEXTO] Phone: ${phoneNumber}, JID: ${jidToUse}`);
+    logger.info(`📝 [TEXTO] Texto: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+    logger.info(`📝 [TEXTO] Timestamp: ${new Date().toISOString()}`);
+    
     try {
       const PhoneNormalizer = require('./utils/phoneNormalizer');
       const kardexApi = require('./kardexApi');
       const kardexDb = require('./kardexDb');
       const smsService = require('./services/smsService');
       
-      // Usar remoteJid original si está disponible
-      const jidToUse = remoteJid || (phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`);
-      
       // Obtener o crear sesión
+      logger.info(`📝 [TEXTO] Obteniendo sesión para: ${phoneNumber}`);
       let session = await sessionManager.getSession(phoneNumber);
       if (!session) {
+        logger.info(`📝 [TEXTO] Creando nueva sesión para: ${phoneNumber}`);
         session = await sessionManager.createSession(phoneNumber);
       }
       
       const stateObj = session.current_order ? JSON.parse(session.current_order) : {};
       const currentState = session.state || sessionManager.STATES.IDLE;
       
-      logger.info(`📱 Procesando mensaje - Estado actual: ${currentState}`);
+      logger.info(`📱 [TEXTO] Procesando mensaje - Estado actual: ${currentState}`);
+      
+      // VERIFICACIÓN PRIORITARIA: Si el usuario ya está autenticado y dice "si soy cliente"
+      const isAuthenticated = stateObj._authenticated === true || !!stateObj._user_token;
+      if (isAuthenticated) {
+        const textLower = text.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
+        
+        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
+        const isYes = yesKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return textLower === keywordLower || 
+                 textLower.startsWith(keywordLower) || 
+                 textLower.includes(keywordLower) ||
+                 textLower.endsWith(keywordLower) ||
+                 (textLower.includes('si') && textLower.includes('cliente')) ||
+                 (textLower.includes('sí') && textLower.includes('cliente'));
+        });
+        
+        if (isYes) {
+          const clientName = stateObj._client_name || 'Cliente';
+          await this.sendMessage(jidToUse,
+            `✅ *Ya confirmamos que eres cliente registrado, *${clientName}*.* ✅\n\n` +
+            `🎯 *¿En qué podemos ayudarte?*\n\n` +
+            `🛍️ Ver catálogo: escribe *CATALOGO*\n` +
+            `🛒 Hacer pedido: escribe tu pedido\n` +
+            `📊 Ver mis pedidos: escribe *MIS PEDIDOS*\n` +
+            `❓ Ayuda: escribe *AYUDA*`
+          );
+          return;
+        }
+      }
       
       // FLUJO 0: Si está esperando confirmación si es cliente registrado (ANTES de cancelación universal)
       if (currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION) {
@@ -513,27 +584,107 @@ class WhatsAppHandler {
           
           logger.info(`[ClientConfirmation] Intención detectada: ${intentResult.intent} (confianza: ${intentResult.confidence})`);
           
-          const textLower = correctedText.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'correcto', 'si soy', 'si estoy'];
-          const noKeywords = ['no', 'n', 'tampoco', 'no soy', 'no estoy', 'todavia no', 'todavía no', 'aun no', 'aún no'];
+          // Limpiar signos de puntuación y normalizar para mejor detección
+          const textLower = correctedText.toLowerCase()
+            .trim()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+            .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+            .trim();
           
-          // Detección mejorada: usar detector de intenciones + keywords
-          const isYes = intentResult.intent === 'yes' || yesKeywords.some(keyword => 
-            textLower === keyword || textLower.startsWith(keyword) || textLower.includes(keyword)
-          );
-          const isNo = intentResult.intent === 'no' || noKeywords.some(keyword => 
-            textLower === keyword || textLower.startsWith(keyword) || textLower.includes(keyword)
-          );
+          const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'correcto', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
+          const noKeywords = ['no', 'n', 'tampoco', 'no soy', 'no estoy', 'no tengo', 'no tengo cuenta', 'todavia no', 'todavía no', 'aun no', 'aún no'];
+          
+          logger.info(`🔍 [TEXTO] Verificando confirmación de cliente - texto limpio: "${textLower}"`);
+          
+          // Detección mejorada: usar detector de intenciones + keywords (sin signos de puntuación)
+          const isYes = intentResult.intent === 'yes' || yesKeywords.some(keyword => {
+            const keywordLower = keyword.toLowerCase();
+            return textLower === keywordLower || 
+                   textLower.startsWith(keywordLower) || 
+                   textLower.includes(keywordLower) ||
+                   textLower.endsWith(keywordLower) ||
+                   (textLower.includes('si') && textLower.includes('cliente')) ||
+                   (textLower.includes('sí') && textLower.includes('cliente'));
+          });
+          const isNo = intentResult.intent === 'no' || noKeywords.some(keyword => {
+            const keywordLower = keyword.toLowerCase();
+            return textLower === keywordLower || 
+                   textLower.startsWith(keywordLower) || 
+                   textLower.includes(keywordLower);
+          });
           
           if (isYes) {
-            // Usuario es cliente, pedir número
-            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PHONE, {});
-            await this.sendMessage(jidToUse,
-              `✅ Perfecto, eres cliente registrado.\n\n` +
-              `📞 Por favor, ingresa tu *número de teléfono* (9 dígitos):\n\n` +
-              `Ejemplo: *987654321* o *51987654321*`
-            );
-            return;
+            // Usuario es cliente, buscar automáticamente por el número del remitente
+            logger.info(`🔍 [TEXTO] Usuario confirmó que es cliente, buscando por número del remitente: ${phoneNumber}`);
+            
+            // Extraer el número real del remitente (puede venir como JID completo)
+            let realPhoneForSearch = phoneNumber;
+            
+            // Si phoneNumber contiene @, extraer solo la parte numérica
+            if (phoneNumber.includes('@')) {
+              realPhoneForSearch = phoneNumber.split('@')[0];
+              logger.info(`🔍 [TEXTO] Extraído número del JID: ${realPhoneForSearch}`);
+            }
+            
+            // Si el número es muy largo (más de 15 dígitos), probablemente es un ID interno, intentar obtener el número real
+            if (realPhoneForSearch.length > 15) {
+              logger.warn(`⚠️ [TEXTO] Número muy largo (${realPhoneForSearch.length} dígitos), puede ser ID interno. Intentando obtener número real...`);
+              // Intentar obtener el número real desde el remoteJid si está disponible
+              if (jidToUse && jidToUse.includes('@lid')) {
+                try {
+                  // Buscar en cache de contactos
+                  if (this.contacts && this.contacts[jidToUse]) {
+                    const contact = this.contacts[jidToUse];
+                    if (contact.jid) {
+                      realPhoneForSearch = contact.jid.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                      logger.info(`✅ [TEXTO] Número real obtenido desde cache: ${realPhoneForSearch}`);
+                    } else if (contact.id) {
+                      realPhoneForSearch = contact.id.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                      logger.info(`✅ [TEXTO] Número real obtenido desde cache (id): ${realPhoneForSearch}`);
+                    }
+                  }
+                } catch (contactError) {
+                  logger.warn(`⚠️ [TEXTO] Error al obtener número real: ${contactError.message}`);
+                }
+              }
+            }
+            
+            // Normalizar el número del remitente
+            const PhoneNormalizer = require('./utils/phoneNormalizer');
+            const remitenteNormalized = PhoneNormalizer.normalize(realPhoneForSearch);
+            logger.info(`🔍 [TEXTO] Número del remitente normalizado: ${remitenteNormalized} (original: ${realPhoneForSearch})`);
+            
+            // Buscar cliente por el número del remitente
+            const clienteRemitente = await kardexApi.getClientByPhone(remitenteNormalized);
+            
+            if (clienteRemitente) {
+              // Cliente encontrado por número del remitente
+              logger.info(`✅ [TEXTO] Cliente encontrado por número del remitente: ${clienteRemitente.nombre}`);
+              await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PASSWORD, {
+                _client_id: clienteRemitente.id,
+                _client_phone: remitenteNormalized,
+                _client_name: clienteRemitente.nombre
+              });
+              await this.sendMessage(jidToUse,
+                `✅ Ya confirmamos que eres cliente registrado, *${clienteRemitente.nombre}*.\n\n` +
+                `🔐 Por favor, *escribe* tu *contraseña* para acceder a tu cuenta.\n\n` +
+                `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
+                `💡 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
+                `💡 O si quieres hacer un pedido sin ingresar, escribe *PEDIDO*`
+              );
+              return;
+            } else {
+              // Cliente no encontrado por número del remitente, pedir número manualmente
+              logger.warn(`⚠️ [TEXTO] Cliente no encontrado por número del remitente: ${remitenteNormalized}`);
+              await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PHONE, {});
+              await this.sendMessage(jidToUse,
+                `✅ Perfecto, eres cliente registrado.\n\n` +
+                `📞 Por favor, ingresa tu *número de teléfono* registrado (9 dígitos):\n\n` +
+                `Ejemplo: *987654321* o *51987654321*`
+              );
+              return;
+            }
           } else if (isNo) {
             // Usuario NO es cliente, mostrar opciones
             await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {});
@@ -585,12 +736,15 @@ class WhatsAppHandler {
         'cancelar todo', 'cancelar operacion', 'cancelar operación'
       ];
       
-      // NO considerar "no" como cancelación si está en estado de confirmación de cliente
-      const isCancelCommand = currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION 
+      // NO considerar "no" como cancelación si está en estado de confirmación de cliente o esperando contraseña
+      const isCancelCommand = (currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION || 
+                                currentState === sessionManager.STATES.AWAITING_PASSWORD)
         ? false 
         : cancelKeywords.some(keyword => textLower.includes(keyword));
       
-      if (isCancelCommand && currentState !== sessionManager.STATES.IDLE && currentState !== sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION) {
+      if (isCancelCommand && currentState !== sessionManager.STATES.IDLE && 
+          currentState !== sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION &&
+          currentState !== sessionManager.STATES.AWAITING_PASSWORD) {
         // Cancelar operación actual y volver al inicio
         await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {});
         await this.sendMessage(jidToUse,
@@ -601,12 +755,496 @@ class WhatsAppHandler {
         return;
       }
       
+      // FLUJO ESPECIAL (TEXTO): Si está esperando contraseña - DEBE ESTAR ANTES DE AWAITING_PHONE
+      if (currentState === sessionManager.STATES.AWAITING_PASSWORD) {
+        // Limpiar texto para mejor detección
+        const textLower = text.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
+        
+        // PRIORIDAD 1: Detectar CANCELAR (incluyendo variantes de transcripción)
+        const cancelKeywords = [
+          'cancelar', 'cancel', 'cancela', 'cancelar todo', 'cancelar operacion',
+          'gonzilar', 'gonzillar', 'gonzil', 'cancilar', 'cancillar', // Variantes de transcripción
+          'volver', 'volver atras', 'volver atrás', 'inicio', 'salir'
+        ];
+        const isCancel = cancelKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return textLower === keywordLower || 
+                 textLower.includes(keywordLower) ||
+                 textLower.startsWith(keywordLower) ||
+                 textLower.endsWith(keywordLower);
+        });
+        
+        if (isCancel) {
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+            _input_phone: undefined,
+            _client_id: undefined,
+            _client_phone: undefined,
+            _client_name: undefined
+          });
+          await this.sendMessage(jidToUse,
+            '❌ Verificación cancelada.\n\n' +
+            '💬 Escribe *HOLA* para comenzar de nuevo.'
+          );
+          return;
+        }
+        
+        // PRIORIDAD 2: Detectar "si soy cliente" o variantes (por si el usuario se confundió)
+        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
+        const isYes = yesKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return textLower === keywordLower || 
+                 textLower.startsWith(keywordLower) || 
+                 textLower.includes(keywordLower) ||
+                 textLower.endsWith(keywordLower) ||
+                 (textLower.includes('si') && textLower.includes('cliente')) ||
+                 (textLower.includes('sí') && textLower.includes('cliente'));
+        });
+        
+        if (isYes) {
+          // El usuario dice "si soy cliente" pero ya está en flujo de contraseña
+          // Esto significa que ya confirmó antes, solo necesita la contraseña
+          const clientName = stateObj._client_name || 'Cliente';
+          await this.sendMessage(jidToUse,
+            `✅ Ya confirmamos que eres cliente registrado, *${clientName}*.\n\n` +
+            '🔐 Ahora necesitamos tu *contraseña* para acceder a tu cuenta.\n\n' +
+            '💡 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"*\n' +
+            '❌ O escribe *CANCELAR* para volver al inicio.'
+          );
+          return;
+        }
+        
+        // PRIORIDAD 3: Detectar si el usuario dice que olvidó su contraseña
+        const forgotPasswordKeywords = [
+          'olvide', 'olvidé', 'olvido', 'olvidó', 'olvido mi contraseña',
+          'olvide contraseña', 'olvidé contraseña', 'no recuerdo',
+          'no recuerdo mi contraseña', 'olvide mi password',
+          'perdi mi contraseña', 'perdí mi contraseña', 'recuperar',
+          'recuperar contraseña', 'cambiar contraseña', 'resetear contraseña'
+        ];
+        
+        const isForgotPassword = forgotPasswordKeywords.some(keyword => 
+          textLower.includes(keyword)
+        );
+        
+        if (isForgotPassword) {
+          // Usuario olvidó su contraseña, enviar código SMS
+          const smsService = require('./services/smsService');
+          const clientPhone = stateObj._client_phone || phoneNumber;
+          const clientName = stateObj._client_name || 'Usuario';
+          
+          // Generar código de verificación
+          const smsCode = smsService.generateVerificationCode();
+          const codeExpiresAt = Date.now() + (10 * 60 * 1000); // 10 minutos
+          
+          // Intentar enviar SMS (en desarrollo, se envía por WhatsApp)
+          const smsSent = await smsService.sendVerificationCode(clientPhone, smsCode, this, jidToUse);
+          
+          if (smsSent) {
+            // Guardar código en sesión
+            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_SMS_CODE, {
+              ...stateObj,
+              _sms_code: smsCode,
+              _sms_code_expires: codeExpiresAt,
+              _sms_attempts: 0
+            });
+            
+            await this.sendMessage(jidToUse,
+              `🔐 *Recuperación de contraseña* 🔐\n\n` +
+              `Hola *${clientName}*,\n\n` +
+              `📱 Hemos enviado un código de verificación de 6 dígitos a tu número de teléfono *${PhoneNormalizer.format(clientPhone)}*.\n\n` +
+              `💬 *También te lo enviamos por WhatsApp arriba.*\n\n` +
+              `🔢 Por favor, ingresa el código que recibiste:\n\n` +
+              `⏰ *El código expira en 10 minutos.*\n\n` +
+              `❌ Si no recibiste el código, escribe *CANCELAR* para volver al inicio.`
+            );
+          } else {
+            // Error al enviar SMS, ofrecer alternativa
+            await this.sendMessage(jidToUse,
+              `❌ No pudimos enviar el SMS al número registrado.\n\n` +
+              `Por favor, contacta con soporte o intenta ingresar tu contraseña nuevamente.\n\n` +
+              `Si no recuerdas tu contraseña, puedes escribir *CANCELAR* para volver al inicio.`
+            );
+          }
+          return;
+        }
+        
+        // Si no es ninguna de las opciones anteriores, es una contraseña
+        const password = text.replace(/[^a-zA-Z0-9]/g, '').trim();
+        logger.info(`🔐 [TEXTO] Contraseña recibida (original): "${text}" -> (limpio): "${password}"`);
+        
+        if (!password || password.length === 0) {
+          await this.sendMessage(jidToUse,
+            '❌ No pude detectar tu contraseña en el mensaje.\n\n' +
+            '💡 Por favor, escribe tu contraseña correctamente.\n\n' +
+            '🔐 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"*'
+          );
+          return;
+        }
+        
+        const clientPhone = stateObj._client_phone || phoneNumber;
+        const clientId = stateObj._client_id; // Usar el ID que ya tenemos en el estado
+        
+        logger.info(`🔐 [TEXTO] Verificando contraseña para cliente: ${clientPhone}, contraseña limpia: "${password}", clientId: ${clientId || 'NO DISPONIBLE'}`);
+        logger.info(`🔐 [TEXTO] Estado actual: ${JSON.stringify({ clientPhone, password, clientId, stateObj: { _client_phone: stateObj._client_phone, _client_id: stateObj._client_id, _client_name: stateObj._client_name, _return_to_confirm: stateObj._return_to_confirm, pedido_id: stateObj.pedido_id } })}`);
+        
+        try {
+          const verifyResult = await kardexApi.verifyClientPassword(clientPhone, password, clientId);
+          
+          logger.info(`🔐 [TEXTO] Resultado completo de verificación: ${JSON.stringify({ success: verifyResult.success, hasCliente: !!verifyResult.cliente, hasToken: !!verifyResult.token, message: verifyResult.message })}`);
+          
+          if (verifyResult && verifyResult.success) {
+            // Contraseña correcta, usuario autenticado
+            logger.success(`✅ [TEXTO] Contraseña correcta! Autenticando usuario...`);
+            
+            // Verificar si había un pedido pendiente de confirmación
+            const hadPendingConfirm = stateObj._return_to_confirm === true || stateObj._pending_confirm === true;
+            logger.info(`🔍 [TEXTO] Verificando pedido pendiente: hadPendingConfirm=${hadPendingConfirm}, pedido_id=${stateObj.pedido_id || stateObj._pedido_id || 'NO'}`);
+            
+            // Obtener pedido_id desde la sesión si no está en stateObj
+            // Buscar usando el phoneNumber actual y también usando el número de teléfono del cliente
+            let pedidoId = stateObj.pedido_id || stateObj._pedido_id;
+            if (!pedidoId) {
+              // Intentar con el phoneNumber actual
+              pedidoId = await sessionManager.getActiveOrderId(phoneNumber);
+              logger.info(`🔍 [TEXTO] Pedido ID obtenido de sesión (phoneNumber): ${pedidoId || 'NO'}`);
+              
+              // Si no se encuentra, intentar con el número de teléfono del cliente
+              if (!pedidoId && clientPhone && clientPhone !== phoneNumber) {
+                const clientPhoneNormalized = clientPhone.replace(/[^0-9]/g, ''); // Limpiar el número
+                const phoneNumberNormalized = phoneNumber.replace(/[^0-9]/g, ''); // Limpiar el phoneNumber
+                
+                // Si son diferentes, buscar con el número del cliente
+                if (clientPhoneNormalized !== phoneNumberNormalized) {
+                  pedidoId = await sessionManager.getActiveOrderId(clientPhone);
+                  logger.info(`🔍 [TEXTO] Pedido ID obtenido de sesión (clientPhone): ${pedidoId || 'NO'}`);
+                }
+              }
+              
+              // Si aún no se encuentra, buscar en TODAS las sesiones activas que tengan pedidos (sin filtrar por phoneNumber)
+              if (!pedidoId) {
+                try {
+                  const db = require('./db');
+                  // Buscar pedidos activos en TODAS las sesiones
+                  const activeSessions = await db.all(
+                    `SELECT phone_number, current_order FROM sessions 
+                     WHERE current_order LIKE '%pedido_id%'`
+                  );
+                  
+                  logger.info(`🔍 [TEXTO] Buscando en ${activeSessions.length} sesiones con pedidos activos`);
+                  
+                  for (const sessionRow of activeSessions) {
+                    try {
+                      const sessionOrder = JSON.parse(sessionRow.current_order || '{}');
+                      if (sessionOrder.pedido_id) {
+                        // Verificar si el pedido existe y está en estado EN_PROCESO
+                        const kardexApi = require('./kardexApi');
+                        const pedido = await kardexApi.getPedidoEnProceso(sessionOrder.pedido_id);
+                        
+                        if (pedido && pedido.estado === 'EN_PROCESO') {
+                          // Verificar si el pedido pertenece al cliente autenticado (por teléfono o cliente_id)
+                          const pedidoClienteId = pedido.cliente_id;
+                          const clienteIdAutenticado = verifyResult.cliente?.id || verifyResult.user?.id;
+                          
+                          // Si el pedido no tiene cliente_id asignado o coincide con el cliente autenticado, usarlo
+                          if (!pedidoClienteId || pedidoClienteId === clienteIdAutenticado) {
+                            pedidoId = sessionOrder.pedido_id;
+                            logger.info(`🔍 [TEXTO] Pedido ID encontrado en sesión alternativa: ${pedidoId} (cliente_id: ${pedidoClienteId || 'NO ASIGNADO'})`);
+                            break;
+                          }
+                        }
+                      }
+                    } catch (e) {
+                      // Ignorar errores de parsing
+                    }
+                  }
+                } catch (dbError) {
+                  logger.error('Error al buscar pedido en sesiones alternativas:', dbError);
+                }
+              }
+              
+              // Si aún no se encuentra, buscar directamente en la base de datos de pedidos
+              // Buscar primero TODOS los pedidos en EN_PROCESO (sin filtrar por cliente_id)
+              if (!pedidoId) {
+                try {
+                  logger.info(`🔍 [TEXTO] Buscando pedidos activos directamente en BD (sin filtrar por cliente_id)`);
+                  const kardexDb = require('./kardexDb');
+                  if (kardexDb.isConnected()) {
+                    const pool = kardexDb.getPool();
+                    // Buscar el pedido más reciente en EN_PROCESO
+                    const [pedidos] = await pool.execute(
+                      `SELECT id, numero_pedido, cliente_id, estado FROM pedidos 
+                       WHERE estado = 'EN_PROCESO' 
+                       ORDER BY id DESC LIMIT 5`
+                    );
+                    
+                    if (pedidos && pedidos.length > 0) {
+                      const clienteIdAutenticado = verifyResult.cliente?.id || verifyResult.user?.id;
+                      
+                      // Buscar el pedido que no tenga cliente_id asignado o que pertenezca al cliente autenticado
+                      const pedidoEncontrado = pedidos.find(p => !p.cliente_id || p.cliente_id === clienteIdAutenticado);
+                      
+                      if (pedidoEncontrado) {
+                        pedidoId = pedidoEncontrado.id;
+                        logger.info(`🔍 [TEXTO] Pedido activo encontrado directamente en BD: ${pedidoId} (cliente_id: ${pedidoEncontrado.cliente_id || 'NO ASIGNADO'})`);
+                      } else {
+                        // Si no encuentra uno específico, usar el más reciente
+                        pedidoId = pedidos[0].id;
+                        logger.info(`🔍 [TEXTO] Usando pedido más reciente en BD: ${pedidoId}`);
+                      }
+                    }
+                  }
+                } catch (bdError) {
+                  logger.error('Error al buscar pedido directamente en BD:', bdError);
+                }
+              }
+            }
+            
+            // Actualizar estado con autenticación, preservando datos del pedido
+            const newStateObj = {
+              _authenticated: true,
+              _client_id: verifyResult.cliente?.id || verifyResult.user?.id,
+              _client_name: verifyResult.cliente?.nombre || verifyResult.user?.nombre_completo,
+              _user_token: verifyResult.token,
+              // Preservar datos del pedido si existían
+              pedido_id: pedidoId,
+              _pedido_id: pedidoId
+            };
+            
+            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, newStateObj);
+            
+            // Si había un pedido pendiente de confirmación O si se encontró un pedido activo, mostrar bienvenida con pedido
+            if ((hadPendingConfirm || pedidoId) && pedidoId) {
+              logger.info(`📦 [TEXTO] Usuario autenticado con pedido pendiente (ID: ${pedidoId}), mostrando información del pedido...`);
+              
+              try {
+                // Obtener detalles del pedido
+                const kardexApi = require('./kardexApi');
+                const pedido = await kardexApi.getPedidoEnProceso(pedidoId);
+                
+                if (pedido) {
+                  // Construir mensaje con información del pedido
+                  let mensajePedido = `✅ *¡Bienvenido *${verifyResult.cliente?.nombre || verifyResult.user?.nombre_completo || 'Cliente'}*!* ✅\n\n`;
+                  mensajePedido += `🛒 *Tu pedido se confirmará después del pago*\n\n`;
+                  
+                  // Agregar información del pedido
+                  if (pedido.numero_pedido) {
+                    mensajePedido += `📦 *Pedido:* ${pedido.numero_pedido}\n\n`;
+                  }
+                  
+                  // Agregar productos del pedido
+                  if (pedido.detalles && pedido.detalles.length > 0) {
+                    mensajePedido += `*Productos:*\n`;
+                    pedido.detalles.forEach((detalle, index) => {
+                      const productoNombre = detalle.producto?.nombre || detalle.nombre_producto || 'Producto';
+                      const cantidad = Number(detalle.cantidad) || 1;
+                      const precio = Number(detalle.precio_unitario || detalle.precio || 0);
+                      const subtotal = cantidad * precio;
+                      mensajePedido += `${index + 1}. *${productoNombre}*\n`;
+                      mensajePedido += `   ${cantidad} x S/. ${precio.toFixed(2)} = S/. ${subtotal.toFixed(2)}\n\n`;
+                    });
+                  }
+                  
+                  // Agregar total
+                  const total = Number(pedido.total || pedido.monto_total || 0);
+                  mensajePedido += `💰 *Total: S/. ${total.toFixed(2)}*\n\n`;
+                  
+                  // Pedir método de pago
+                  mensajePedido += `💳 *Por favor, selecciona tu método de pago:*\n\n`;
+                  mensajePedido += `• *TRANSFERENCIA* - Transferencia bancaria\n`;
+                  mensajePedido += `• *EFECTIVO* - Pago en efectivo\n`;
+                  mensajePedido += `• *YAPE* - Pago por Yape\n`;
+                  mensajePedido += `• *PLIN* - Pago por Plin\n\n`;
+                  mensajePedido += `Responde con el nombre del método de pago que deseas usar.`;
+                  
+                  // Actualizar estado para esperar método de pago
+                  await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PAYMENT_METHOD, {
+                    ...newStateObj,
+                    _awaiting_payment_method: true
+                  });
+                  
+                  await this.sendMessage(jidToUse, mensajePedido);
+                  return;
+                } else {
+                  logger.warn(`⚠️ [TEXTO] No se pudo obtener detalles del pedido ${pedidoId}`);
+                }
+              } catch (pedidoError) {
+                logger.error(`❌ [TEXTO] Error al obtener detalles del pedido:`, pedidoError);
+              }
+            }
+            
+            // Si no había pedido pendiente, mostrar mensaje de bienvenida normal
+            await this.sendMessage(jidToUse,
+              `✅ *¡Bienvenido *${verifyResult.cliente?.nombre || verifyResult.user?.nombre_completo || 'Cliente'}*!* ✅\n\n` +
+              `🎯 *¿Qué deseas hacer hoy?*\n\n` +
+              `🛍️ Ver catálogo: escribe *CATALOGO*\n` +
+              `🛒 Hacer pedido: escribe tu pedido\n` +
+              `📊 Ver mis pedidos: escribe *MIS PEDIDOS*\n` +
+              `❓ Ayuda: escribe *AYUDA*`
+            );
+            return;
+          } else {
+            logger.warn(`🔐 [TEXTO] Contraseña incorrecta para cliente: ${clientPhone}, contraseña intentada: "${password}", mensaje: ${verifyResult?.message || 'Sin mensaje'}`);
+            await this.sendMessage(jidToUse,
+              `❌ Contraseña incorrecta.\n\n` +
+              `💡 La contraseña que intentaste fue: *${password}*\n\n` +
+              `Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
+              `O escribe *CANCELAR* para volver al inicio.`
+            );
+            return;
+          }
+        } catch (passwordError) {
+          logger.error('Error al verificar contraseña', passwordError);
+          await this.sendMessage(jidToUse,
+            `❌ Hubo un error al verificar tu contraseña.\n\n` +
+            `Por favor, intenta nuevamente o escribe *CANCELAR* para volver al inicio.`
+          );
+          return;
+        }
+      }
+      
+      // FLUJO 0.5: Si está esperando método de pago
+      if (currentState === sessionManager.STATES.AWAITING_PAYMENT_METHOD) {
+        const transcriptionCorrector = require('./utils/transcriptionCorrector');
+        const intencion = transcriptionCorrector.detectarIntencion(text);
+        const textLower = text.toLowerCase().trim();
+        
+        // Mapeo de intenciones a métodos de pago
+        const metodosPago = {
+          'pago_transferencia': 'TRANSFERENCIA',
+          'pago_efectivo': 'EFECTIVO',
+          'pago_yape': 'YAPE',
+          'pago_plin': 'PLIN'
+        };
+        
+        // Buscar método de pago usando el corrector
+        let metodoSeleccionado = metodosPago[intencion] || null;
+        
+        // Si no se detectó por intención, buscar por palabras clave
+        if (!metodoSeleccionado) {
+          if (transcriptionCorrector.coincide(textLower, transcriptionCorrector.correcciones.transferencia)) {
+            metodoSeleccionado = 'TRANSFERENCIA';
+          } else if (transcriptionCorrector.coincide(textLower, transcriptionCorrector.correcciones.efectivo)) {
+            metodoSeleccionado = 'EFECTIVO';
+          } else if (transcriptionCorrector.coincide(textLower, transcriptionCorrector.correcciones.yape)) {
+            metodoSeleccionado = 'YAPE';
+          } else if (transcriptionCorrector.coincide(textLower, transcriptionCorrector.correcciones.plin)) {
+            metodoSeleccionado = 'PLIN';
+          }
+        }
+        
+        if (metodoSeleccionado) {
+          logger.info(`💳 [TEXTO] Método de pago seleccionado: ${metodoSeleccionado}`);
+          
+          const pedidoId = stateObj.pedido_id || stateObj._pedido_id;
+          if (pedidoId) {
+            // Confirmar pedido con método de pago
+            const orderHandler = require('./orderHandler');
+            const sessionStateWithPayment = {
+              state: sessionManager.STATES.IDLE,
+              phoneNumber,
+              nombreCliente: stateObj._client_name || 'Cliente',
+              remoteJid: jidToUse,
+              authenticated: true,
+              user_token: stateObj._user_token,
+              _authenticated: true,
+              _user_token: stateObj._user_token,
+              _client_id: stateObj._client_id,
+              _client_name: stateObj._client_name,
+              pedido_id: pedidoId,
+              metodo_pago: metodoSeleccionado,
+              ...stateObj
+            };
+            
+            // Confirmar pedido con método de pago
+            await orderHandler.confirmOrder(phoneNumber, this, sessionStateWithPayment);
+            return;
+          } else {
+            await this.sendMessage(jidToUse,
+              `❌ No se encontró un pedido activo. Por favor, inicia un nuevo pedido.`
+            );
+            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+              ...stateObj,
+              _awaiting_payment_method: false
+            });
+            return;
+          }
+        } else {
+          await this.sendMessage(jidToUse,
+            `❌ Método de pago no reconocido.\n\n` +
+            `Por favor, selecciona uno de los siguientes métodos:\n\n` +
+            `• *TRANSFERENCIA* - Transferencia bancaria\n` +
+            `• *EFECTIVO* - Pago en efectivo\n` +
+            `• *YAPE* - Pago por Yape\n` +
+            `• *PLIN* - Pago por Plin\n\n` +
+            `O escribe *CANCELAR* para cancelar el pedido.`
+          );
+          return;
+        }
+      }
+      
       // FLUJO 1: Si está esperando número de teléfono
       if (currentState === sessionManager.STATES.AWAITING_PHONE) {
-        const phoneInput = PhoneNormalizer.normalize(text);
+        // PRIORIDAD: Detectar CANCELAR antes de procesar como número
+        const textLowerForCancel = text.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
+        
+        const cancelKeywords = [
+          'cancelar', 'cancel', 'cancela', 'cancelar todo', 'cancelar operacion',
+          'gonzilar', 'gonzillar', 'gonzil', 'cancilar', 'cancillar', // Variantes de transcripción
+          'volver', 'volver atras', 'volver atrás', 'inicio', 'salir'
+        ];
+        const isCancel = cancelKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return textLowerForCancel === keywordLower || 
+                 textLowerForCancel.includes(keywordLower) ||
+                 textLowerForCancel.startsWith(keywordLower) ||
+                 textLowerForCancel.endsWith(keywordLower);
+        });
+        
+        if (isCancel) {
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+            _input_phone: undefined,
+            _client_id: undefined,
+            _client_phone: undefined,
+            _client_name: undefined
+          });
+          await this.sendMessage(jidToUse,
+            '❌ Operación cancelada.\n\n' +
+            '💬 Escribe *HOLA* para comenzar de nuevo.'
+          );
+          return;
+        }
+        
+        // Limpiar transcripción: quitar TODOS los caracteres que no sean números
+        // Whisper a veces transcribe "9 9 3 0 4 3 1 1 2" o "99, 30, 43, 1, 1, 2" o "99-30-43-1-1-2" o "9-9-3-0-4-3-1-1"
+        const cleanedText = text.replace(/[^0-9]/g, '');
+        logger.info(`📞 [TEXTO] Número recibido (original): "${text}" -> (limpio): "${cleanedText}"`);
+        
+        // Si después de limpiar no hay números, es un error
+        if (!cleanedText || cleanedText.length === 0) {
+          await this.sendMessage(jidToUse, 
+            '❌ No pude detectar un número de teléfono en tu mensaje.\n\n' +
+            '💡 Por favor, escribe tu número de 9 dígitos (ejemplo: 987654321) o con código de país (51987654321).\n\n' +
+            '❌ O escribe *CANCELAR* para volver al inicio.'
+          );
+          return;
+        }
+        
+        const phoneInput = PhoneNormalizer.normalize(cleanedText);
         if (!PhoneNormalizer.isValidPeruvianPhone(phoneInput)) {
           await this.sendMessage(jidToUse, 
-            '❌ El número de teléfono no es válido. Por favor, ingresa un número de 9 dígitos (ejemplo: 987654321) o con código de país (51987654321).'
+            `❌ El número de teléfono no es válido.\n\n` +
+            `📞 Detecté: *${cleanedText}*\n\n` +
+            `Por favor, ingresa un número de 9 dígitos (ejemplo: 987654321) o con código de país (51987654321).`
           );
           return;
         }
@@ -634,7 +1272,8 @@ class WhatsAppHandler {
           });
           await this.sendMessage(jidToUse,
             `👋 ¡Hola *${cliente.nombre}*! 👋\n\n` +
-            `Para acceder a tu cuenta y ver tus pedidos, por favor ingresa tu *contraseña* de la página web.\n\n` +
+            `Para acceder a tu cuenta y ver tus pedidos, por favor *escribe* tu *contraseña* de la página web.\n\n` +
+            `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
             `🔐 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
             `Si no tienes contraseña, puedes registrarte escribiendo *REGISTRAR*`
           );
@@ -658,9 +1297,68 @@ class WhatsAppHandler {
       
       // FLUJO 2: Si está esperando contraseña
       if (currentState === sessionManager.STATES.AWAITING_PASSWORD) {
-        const textLower = text.toLowerCase().trim();
+        // Limpiar texto para mejor detección
+        const textLower = text.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
         
-        // Detectar si el usuario dice que olvidó su contraseña
+        // PRIORIDAD 1: Detectar CANCELAR (incluyendo variantes de transcripción)
+        const cancelKeywords = [
+          'cancelar', 'cancel', 'cancela', 'cancelar todo', 'cancelar operacion',
+          'gonzilar', 'gonzillar', 'gonzil', 'cancilar', 'cancillar', // Variantes de transcripción
+          'volver', 'volver atras', 'volver atrás', 'inicio', 'salir'
+        ];
+        const isCancel = cancelKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return textLower === keywordLower || 
+                 textLower.includes(keywordLower) ||
+                 textLower.startsWith(keywordLower) ||
+                 textLower.endsWith(keywordLower);
+        });
+        
+        if (isCancel) {
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+            _input_phone: undefined,
+            _client_id: undefined,
+            _client_phone: undefined,
+            _client_name: undefined
+          });
+          await this.sendMessage(jidToUse,
+            '❌ Verificación cancelada.\n\n' +
+            '💬 Escribe *HOLA* para comenzar de nuevo.'
+          );
+          return;
+        }
+        
+        // PRIORIDAD 2: Detectar "si soy cliente" o variantes (por si el usuario se confundió)
+        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
+        const isYes = yesKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return textLower === keywordLower || 
+                 textLower.includes(keywordLower) ||
+                 textLower.startsWith(keywordLower) ||
+                 textLower.endsWith(keywordLower) ||
+                 (textLower.includes('si') && textLower.includes('cliente')) ||
+                 (textLower.includes('sí') && textLower.includes('cliente'));
+        });
+        
+        if (isYes) {
+          // El usuario dice "si soy cliente" pero ya está en flujo de contraseña
+          // Esto significa que ya confirmó antes, solo necesita la contraseña
+          const clientName = stateObj._client_name || 'Cliente';
+          await this.sendMessage(jidToUse,
+            `✅ Ya confirmamos que eres cliente registrado, *${clientName}*.\n\n` +
+            '🔐 Ahora necesitamos tu *contraseña* para acceder a tu cuenta.\n\n' +
+            '💡 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"*\n' +
+            '❌ O escribe *CANCELAR* para volver al inicio.'
+          );
+          return;
+        }
+        
+        // PRIORIDAD 3: Detectar si el usuario dice que olvidó su contraseña
         const forgotPasswordKeywords = [
           'olvide', 'olvidé', 'olvido', 'olvidó', 'olvido mi contraseña',
           'olvide contraseña', 'olvidé contraseña', 'no recuerdo',
@@ -682,8 +1380,8 @@ class WhatsAppHandler {
           const smsCode = smsService.generateVerificationCode();
           const codeExpiresAt = Date.now() + (10 * 60 * 1000); // 10 minutos
           
-          // Intentar enviar SMS
-          const smsSent = await smsService.sendVerificationCode(clientPhone, smsCode);
+          // Intentar enviar SMS (en desarrollo, se envía por WhatsApp)
+          const smsSent = await smsService.sendVerificationCode(clientPhone, smsCode, this, jidToUse);
           
           if (smsSent) {
             // Guardar código en sesión
@@ -698,9 +1396,10 @@ class WhatsAppHandler {
               `🔐 *Recuperación de contraseña* 🔐\n\n` +
               `Hola *${clientName}*,\n\n` +
               `📱 Hemos enviado un código de verificación de 6 dígitos a tu número de teléfono *${PhoneNormalizer.format(clientPhone)}*.\n\n` +
-              `🔢 Por favor, ingresa el código que recibiste por SMS:\n\n` +
+              `💬 *También te lo enviamos por WhatsApp arriba.*\n\n` +
+              `🔢 Por favor, ingresa el código que recibiste:\n\n` +
               `⏰ *El código expira en 10 minutos.*\n\n` +
-              `❌ Si no recibiste el código, escribe *CANCELAR* y contacta con soporte.`
+              `❌ Si no recibiste el código, escribe *CANCELAR* para volver al inicio.`
             );
           } else {
             // Error al enviar SMS, ofrecer alternativa
@@ -714,34 +1413,228 @@ class WhatsAppHandler {
         }
         
         // Si no es "olvidé contraseña", intentar verificar contraseña normal
-        const password = text.trim();
-        const clientPhone = stateObj._client_phone || phoneNumber;
+        // Limpiar contraseña: quitar TODOS los caracteres que no sean alfanuméricos (comas, espacios, guiones, puntos, etc.)
+        // Por si viene de copiar/pegar o dictado con comas/guiones
+        const password = text.replace(/[^a-zA-Z0-9]/g, '').trim();
+        logger.info(`🔐 [TEXTO] Contraseña recibida (original): "${text}" -> (limpio): "${password}"`);
         
-        const verifyResult = await kardexApi.verifyClientPassword(clientPhone, password);
-        
-        if (verifyResult.success) {
-          // Contraseña correcta, usuario autenticado
-          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
-            _authenticated: true,
-            _client_id: verifyResult.cliente.id,
-            _client_name: verifyResult.cliente.nombre,
-            _user_token: verifyResult.token
-          });
-          
+        if (!password || password.length === 0) {
           await this.sendMessage(jidToUse,
-            `✅ *¡Bienvenido *${verifyResult.cliente.nombre}*!* ✅\n\n` +
-            `🎯 *¿Qué deseas hacer hoy?*\n\n` +
-            `🛍️ Ver catálogo: escribe *CATALOGO*\n` +
-            `🛒 Hacer pedido: escribe tu pedido\n` +
-            `📊 Ver mis pedidos: escribe *MIS PEDIDOS*\n` +
-            `❓ Ayuda: escribe *AYUDA*`
+            '❌ No pude detectar tu contraseña en el mensaje.\n\n' +
+            '💡 Por favor, escribe tu contraseña correctamente.\n\n' +
+            '🔐 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"*'
           );
           return;
-        } else {
+        }
+        
+        const clientPhone = stateObj._client_phone || phoneNumber;
+        const clientId = stateObj._client_id; // Usar el ID que ya tenemos en el estado
+        
+        logger.info(`🔐 [TEXTO] Verificando contraseña para cliente: ${clientPhone}, contraseña limpia: "${password}", clientId: ${clientId || 'NO DISPONIBLE'}`);
+          logger.info(`🔐 [TEXTO] Estado actual: ${JSON.stringify({ clientPhone, password, clientId, stateObj: { _client_phone: stateObj._client_phone, _client_id: stateObj._client_id, _client_name: stateObj._client_name, _return_to_confirm: stateObj._return_to_confirm, pedido_id: stateObj.pedido_id } })}`);
+        
+        try {
+          const verifyResult = await kardexApi.verifyClientPassword(clientPhone, password, clientId);
+          
+          logger.info(`🔐 [TEXTO] Resultado completo de verificación: ${JSON.stringify({ success: verifyResult.success, hasCliente: !!verifyResult.cliente, hasToken: !!verifyResult.token, message: verifyResult.message })}`);
+          
+          if (verifyResult && verifyResult.success) {
+            // Contraseña correcta, usuario autenticado
+            logger.success(`✅ [TEXTO] Contraseña correcta! Autenticando usuario...`);
+            
+            // Verificar si había un pedido pendiente de confirmación
+            const hadPendingConfirm = stateObj._return_to_confirm === true || stateObj._pending_confirm === true;
+            logger.info(`🔍 [TEXTO] Verificando pedido pendiente: hadPendingConfirm=${hadPendingConfirm}, pedido_id=${stateObj.pedido_id || stateObj._pedido_id || 'NO'}`);
+            
+            // Obtener pedido_id desde la sesión si no está en stateObj
+            // Buscar usando el phoneNumber actual y también usando el número de teléfono del cliente
+            let pedidoId = stateObj.pedido_id || stateObj._pedido_id;
+            if (!pedidoId) {
+              // Intentar con el phoneNumber actual
+              pedidoId = await sessionManager.getActiveOrderId(phoneNumber);
+              logger.info(`🔍 [TEXTO] Pedido ID obtenido de sesión (phoneNumber): ${pedidoId || 'NO'}`);
+              
+              // Si no se encuentra, intentar con el número de teléfono del cliente
+              if (!pedidoId && clientPhone && clientPhone !== phoneNumber) {
+                const clientPhoneNormalized = clientPhone.replace(/[^0-9]/g, ''); // Limpiar el número
+                const phoneNumberNormalized = phoneNumber.replace(/[^0-9]/g, ''); // Limpiar el phoneNumber
+                
+                // Si son diferentes, buscar con el número del cliente
+                if (clientPhoneNormalized !== phoneNumberNormalized) {
+                  pedidoId = await sessionManager.getActiveOrderId(clientPhone);
+                  logger.info(`🔍 [TEXTO] Pedido ID obtenido de sesión (clientPhone): ${pedidoId || 'NO'}`);
+                }
+              }
+              
+              // Si aún no se encuentra, buscar en todas las sesiones activas que tengan pedidos
+              if (!pedidoId) {
+                try {
+                  const db = require('./db');
+                  // Buscar pedidos activos en TODAS las sesiones (sin filtrar por phoneNumber)
+                  const activeSessions = await db.all(
+                    `SELECT phone_number, current_order FROM sessions 
+                     WHERE current_order LIKE '%pedido_id%'`
+                  );
+                  
+                  logger.info(`🔍 [TEXTO] Buscando en ${activeSessions.length} sesiones con pedidos activos`);
+                  
+                  for (const sessionRow of activeSessions) {
+                    try {
+                      const sessionOrder = JSON.parse(sessionRow.current_order || '{}');
+                      if (sessionOrder.pedido_id) {
+                        // Verificar si el pedido existe y está en estado EN_PROCESO
+                        const kardexApi = require('./kardexApi');
+                        const pedido = await kardexApi.getPedidoEnProceso(sessionOrder.pedido_id);
+                        
+                        if (pedido && pedido.estado === 'EN_PROCESO') {
+                          // Verificar si el pedido pertenece al cliente autenticado (por teléfono o cliente_id)
+                          const pedidoClienteId = pedido.cliente_id;
+                          const clienteIdAutenticado = verifyResult.cliente?.id || verifyResult.user?.id;
+                          
+                          // Si el pedido no tiene cliente_id asignado o coincide con el cliente autenticado, usarlo
+                          if (!pedidoClienteId || pedidoClienteId === clienteIdAutenticado) {
+                            pedidoId = sessionOrder.pedido_id;
+                            logger.info(`🔍 [TEXTO] Pedido ID encontrado en sesión alternativa: ${pedidoId} (cliente_id: ${pedidoClienteId || 'NO ASIGNADO'})`);
+                            break;
+                          }
+                        }
+                      }
+                    } catch (e) {
+                      // Ignorar errores de parsing
+                    }
+                  }
+                  
+                  // Si aún no se encuentra, buscar directamente en la base de datos de pedidos
+                  if (!pedidoId) {
+                    try {
+                      const clienteIdAutenticado = verifyResult.cliente?.id || verifyResult.user?.id;
+                      if (clienteIdAutenticado) {
+                        logger.info(`🔍 [TEXTO] Buscando pedidos activos directamente en BD para cliente_id: ${clienteIdAutenticado}`);
+                        const kardexDb = require('./kardexDb');
+                        if (kardexDb.isConnected()) {
+                          const pool = kardexDb.getPool();
+                          const [pedidos] = await pool.execute(
+                            `SELECT id, numero_pedido, cliente_id, estado FROM pedidos 
+                             WHERE estado = 'EN_PROCESO' 
+                             AND (cliente_id = ? OR cliente_id IS NULL)
+                             ORDER BY id DESC LIMIT 1`,
+                            [clienteIdAutenticado]
+                          );
+                          
+                          if (pedidos && pedidos.length > 0) {
+                            pedidoId = pedidos[0].id;
+                            logger.info(`🔍 [TEXTO] Pedido activo encontrado directamente en BD: ${pedidoId}`);
+                          }
+                        }
+                      }
+                    } catch (bdError) {
+                      logger.error('Error al buscar pedido directamente en BD:', bdError);
+                    }
+                  }
+                } catch (dbError) {
+                  logger.error('Error al buscar pedido en sesiones alternativas:', dbError);
+                }
+              }
+            }
+            
+            // Actualizar estado con autenticación, preservando datos del pedido
+            const newStateObj = {
+              _authenticated: true,
+              _client_id: verifyResult.cliente?.id || verifyResult.user?.id,
+              _client_name: verifyResult.cliente?.nombre || verifyResult.user?.nombre_completo,
+              _user_token: verifyResult.token,
+              // Preservar datos del pedido si existían
+              pedido_id: pedidoId,
+              _pedido_id: pedidoId
+            };
+            
+            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, newStateObj);
+            
+            // Si había un pedido pendiente de confirmación O si se encontró un pedido activo, mostrar bienvenida con pedido
+            if ((hadPendingConfirm || pedidoId) && pedidoId) {
+              logger.info(`📦 [TEXTO] Usuario autenticado con pedido pendiente (ID: ${pedidoId}), mostrando información del pedido...`);
+              
+              try {
+                // Obtener detalles del pedido
+                const kardexApi = require('./kardexApi');
+                const pedido = await kardexApi.getPedidoEnProceso(pedidoId);
+                
+                if (pedido) {
+                  // Construir mensaje con información del pedido
+                  let mensajePedido = `✅ *¡Bienvenido *${verifyResult.cliente?.nombre || verifyResult.user?.nombre_completo || 'Cliente'}*!* ✅\n\n`;
+                  mensajePedido += `🛒 *Tu pedido se confirmará después del pago*\n\n`;
+                  
+                  // Agregar información del pedido
+                  if (pedido.numero_pedido) {
+                    mensajePedido += `📦 *Pedido:* ${pedido.numero_pedido}\n\n`;
+                  }
+                  
+                  // Agregar productos del pedido
+                  if (pedido.detalles && pedido.detalles.length > 0) {
+                    mensajePedido += `*Productos:*\n`;
+                    pedido.detalles.forEach((detalle, index) => {
+                      const productoNombre = detalle.producto?.nombre || detalle.nombre_producto || 'Producto';
+                      const cantidad = Number(detalle.cantidad) || 1;
+                      const precio = Number(detalle.precio_unitario || detalle.precio || 0);
+                      const subtotal = cantidad * precio;
+                      mensajePedido += `${index + 1}. *${productoNombre}*\n`;
+                      mensajePedido += `   ${cantidad} x S/. ${precio.toFixed(2)} = S/. ${subtotal.toFixed(2)}\n\n`;
+                    });
+                  }
+                  
+                  // Agregar total
+                  const total = Number(pedido.total || pedido.monto_total || 0);
+                  mensajePedido += `💰 *Total: S/. ${total.toFixed(2)}*\n\n`;
+                  
+                  // Pedir método de pago
+                  mensajePedido += `💳 *Por favor, selecciona tu método de pago:*\n\n`;
+                  mensajePedido += `• *TRANSFERENCIA* - Transferencia bancaria\n`;
+                  mensajePedido += `• *EFECTIVO* - Pago en efectivo\n`;
+                  mensajePedido += `• *YAPE* - Pago por Yape\n`;
+                  mensajePedido += `• *PLIN* - Pago por Plin\n\n`;
+                  mensajePedido += `Responde con el nombre del método de pago que deseas usar.`;
+                  
+                  // Actualizar estado para esperar método de pago
+                  await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PAYMENT_METHOD, {
+                    ...newStateObj,
+                    _awaiting_payment_method: true
+                  });
+                  
+                  await this.sendMessage(jidToUse, mensajePedido);
+                  return;
+                } else {
+                  logger.warn(`⚠️ [TEXTO] No se pudo obtener detalles del pedido ${pedidoId}`);
+                }
+              } catch (pedidoError) {
+                logger.error(`❌ [TEXTO] Error al obtener detalles del pedido:`, pedidoError);
+              }
+            }
+            
+            // Si no había pedido pendiente, mostrar mensaje de bienvenida normal
+            await this.sendMessage(jidToUse,
+              `✅ *¡Bienvenido *${verifyResult.cliente?.nombre || verifyResult.user?.nombre_completo || 'Cliente'}*!* ✅\n\n` +
+              `🎯 *¿Qué deseas hacer hoy?*\n\n` +
+              `🛍️ Ver catálogo: escribe *CATALOGO*\n` +
+              `🛒 Hacer pedido: escribe tu pedido\n` +
+              `📊 Ver mis pedidos: escribe *MIS PEDIDOS*\n` +
+              `❓ Ayuda: escribe *AYUDA*`
+            );
+            return;
+          } else {
+            logger.warn(`🔐 [TEXTO] Contraseña incorrecta para cliente: ${clientPhone}, contraseña intentada: "${password}", mensaje: ${verifyResult?.message || 'Sin mensaje'}`);
+            await this.sendMessage(jidToUse,
+              `❌ Contraseña incorrecta.\n\n` +
+              `💡 La contraseña que intentaste fue: *${password}*\n\n` +
+              `Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
+              `O escribe *CANCELAR* para volver al inicio.`
+            );
+            return;
+          }
+        } catch (verifyError) {
+          logger.error(`🔐 [TEXTO] Error al verificar contraseña:`, verifyError);
           await this.sendMessage(jidToUse,
-            `❌ Contraseña incorrecta.\n\n` +
-            `Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
-            `O escribe *CANCELAR* para volver al inicio.`
+            `❌ Error al verificar tu contraseña. Por favor, intenta de nuevo.\n\n` +
+            `Si el problema persiste, escribe *"olvidé mi contraseña"* para recuperar tu cuenta.`
           );
           return;
         }
@@ -1036,7 +1929,8 @@ class WhatsAppHandler {
               `ℹ️ *Ya tienes una cuenta registrada* ℹ️\n\n` +
               `El número *${PhoneNormalizer.format(phoneToCheck)}* ya está asociado a la cuenta:\n` +
               `👤 *${clienteExistente.nombre}*\n\n` +
-              `🔐 *Para acceder a tu cuenta, ingresa tu contraseña:*\n\n` +
+              `🔐 *Para acceder a tu cuenta, escribe tu contraseña:*\n\n` +
+              `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
               `Si no recuerdas tu contraseña o no tienes una, escribe *AYUDA* para más opciones.`
             );
             
@@ -1102,7 +1996,9 @@ class WhatsAppHandler {
       // FLUJO 6: Si no está autenticado y no está en ningún flujo, verificar si es un número de teléfono
       if (currentState === sessionManager.STATES.IDLE && !stateObj._authenticated && !stateObj._temp_nombre) {
         // Detectar si el mensaje es un número de teléfono (9 dígitos o con código de país)
-        const phoneInput = PhoneNormalizer.normalize(text);
+        // Limpiar transcripción de voz: quitar comas, espacios, puntos y guiones
+        const cleanedText = text.replace(/[,.\s-]/g, '');
+        const phoneInput = PhoneNormalizer.normalize(cleanedText);
         if (PhoneNormalizer.isValidPeruvianPhone(phoneInput)) {
           // Es un número de teléfono válido, procesarlo como entrada de teléfono
           logger.info(`📞 Número detectado automáticamente: ${phoneInput}`);
@@ -1130,7 +2026,8 @@ class WhatsAppHandler {
             });
             await this.sendMessage(jidToUse,
               `👋 ¡Hola *${cliente.nombre}*! 👋\n\n` +
-              `Para acceder a tu cuenta y ver tus pedidos, por favor ingresa tu *contraseña* de la página web.\n\n` +
+              `Para acceder a tu cuenta y ver tus pedidos, por favor *escribe* tu *contraseña* de la página web.\n\n` +
+              `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
               `Si no tienes contraseña, puedes registrarte escribiendo *REGISTRAR*`
             );
             return;
@@ -1177,7 +2074,8 @@ class WhatsAppHandler {
             await this.sendMessage(jidToUse,
               `👋 ¡Hola *${clienteRemitente.nombre}*! 👋\n\n` +
               `Te reconocí por tu número de WhatsApp.\n\n` +
-              `Para acceder a tu cuenta y ver tus pedidos, por favor ingresa tu *contraseña* de la página web.\n\n` +
+              `Para acceder a tu cuenta y ver tus pedidos, por favor *escribe* tu *contraseña* de la página web.\n\n` +
+              `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
               `🔐 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
               `💡 O si quieres hacer un pedido sin ingresar, escribe *PEDIDO*`
             );
@@ -1342,55 +2240,120 @@ class WhatsAppHandler {
           phone: stateObj._temp_phone
         } : null
       };
-      const nluResult = await nlu.processMessage(text, sessionStateWithPhone, conversationHistory, false);
       
-      logger.info(`🔍 NLU detectó: intent=${nluResult.intent}, tiene response=${!!nluResult.response}`);
-
-      // Manejar respuesta del NLU
-      if (nluResult.response) {
-        // Si tiene acción, manejarla (pasar jidToUse en lugar de phoneNumber)
-        if (nluResult.response.action) {
-          await this.handleAction(jidToUse, nluResult.response.action, nluResult.response, sessionStateWithPhone);
-        } 
-        // Si tiene mensaje, enviarlo
-        else if (nluResult.response.message) {
-          await this.sendMessage(jidToUse, nluResult.response.message);
-          // Guardar respuesta del bot en historial
-          await sessionManager.saveMessage(phoneNumber, 'text', nluResult.response.message, true);
-        }
-        // Si tiene productos (catálogo), enviar mensaje formateado
-        else if (nluResult.response.productos) {
-          await this.sendMessage(jidToUse, nluResult.response.message || 'Catálogo de productos');
-          await sessionManager.saveMessage(phoneNumber, 'text', nluResult.response.message || 'Catálogo de productos', true);
-        }
-      } else {
-        // Si no hay respuesta, dar opciones útiles sin decir "no entendí"
-        logger.warn('⚠️ NLU no devolvió respuesta, dando opciones útiles');
-        await this.sendMessage(jidToUse, 
-          `👋 *¡Hola!* 👋\n\n` +
-          `📋 *¿En qué puedo ayudarte?*\n\n` +
-          `🛍️ *Ver productos:* Escribe *CATALOGO*\n` +
-          `🛒 *Hacer pedido:* Escribe lo que necesitas\n` +
-          `💰 *Consultar precio:* "¿Cuánto cuesta X?"\n` +
-          `📊 *Ver pedido:* Escribe *ESTADO*\n` +
-          `❓ *Ayuda:* Escribe *AYUDA*\n\n` +
-          `💡 También puedes enviarme una nota de voz.`
+      let nluResult = null;
+      let nluError = null;
+      
+      // Procesar con NLU con timeout y manejo de errores robusto
+      try {
+        logger.info(`📝 [TEXTO] Llamando a NLU para procesar mensaje...`);
+        const nluPromise = nlu.processMessage(text, sessionStateWithPhone, conversationHistory, false);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('NLU timeout después de 30 segundos')), 30000)
         );
+        
+        nluResult = await Promise.race([nluPromise, timeoutPromise]);
+        logger.info(`🔍 [TEXTO] NLU detectó: intent=${nluResult.intent}, tiene response=${!!nluResult.response}`);
+      } catch (nluErr) {
+        nluError = nluErr;
+        logger.error(`❌ [TEXTO] Error en NLU:`, {
+          error: nluErr.message,
+          stack: nluErr.stack?.substring(0, 500)
+        });
+        // Crear resultado de fallback
+        nluResult = {
+          intent: 'error',
+          response: {
+            message: '😅 Lo siento, hubo un problema al procesar tu mensaje.\n\n' +
+              '💡 Por favor intenta:\n' +
+              '• Reformular tu mensaje\n' +
+              '• Escribir *AYUDA* para ver opciones\n' +
+              '• Intentar de nuevo en unos momentos'
+          }
+        };
       }
 
-    } catch (error) {
-      logger.error('❌ Error al procesar mensaje de texto:', error);
-      logger.error('Stack:', error.stack?.substring(0, 500));
+      // Manejar respuesta del NLU - SIEMPRE enviar una respuesta
+      let responseSent = false;
       
-      const jidToUse = remoteJid || (phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`);
-      
-      // Intentar recuperación inteligente
       try {
-        // Si hay un error crítico, intentar detectar qué quería el usuario
-        const intentDetector = require('./utils/intentDetector');
-        const fallbackIntent = await intentDetector.detectIntent(text, { state: currentState }, []);
+        if (nluResult && nluResult.response) {
+          // Si tiene acción, manejarla (pasar jidToUse en lugar de phoneNumber)
+          if (nluResult.response.action) {
+            logger.info(`📝 [TEXTO] Ejecutando acción: ${nluResult.response.action}`);
+            await this.handleAction(jidToUse, nluResult.response.action, nluResult.response, sessionStateWithPhone);
+            responseSent = true;
+          } 
+          // Si tiene mensaje, enviarlo
+          else if (nluResult.response.message) {
+            logger.info(`📝 [TEXTO] Enviando mensaje del NLU`);
+            await this.sendMessage(jidToUse, nluResult.response.message);
+            // Guardar respuesta del bot en historial
+            await sessionManager.saveMessage(phoneNumber, 'text', nluResult.response.message, true);
+            responseSent = true;
+          }
+          // Si tiene productos (catálogo), enviar mensaje formateado
+          else if (nluResult.response.productos) {
+            logger.info(`📝 [TEXTO] Enviando catálogo de productos`);
+            await this.sendMessage(jidToUse, nluResult.response.message || 'Catálogo de productos');
+            await sessionManager.saveMessage(phoneNumber, 'text', nluResult.response.message || 'Catálogo de productos', true);
+            responseSent = true;
+          }
+        }
         
-        logger.info(`[Recovery] Detectando intención de fallback: ${fallbackIntent.intent}`);
+        // Si no se envió respuesta, enviar opciones útiles
+        if (!responseSent) {
+          logger.warn('⚠️ [TEXTO] NLU no devolvió respuesta válida, enviando opciones útiles');
+          await this.sendMessage(jidToUse, 
+            `👋 *¡Hola!* 👋\n\n` +
+            `📋 *¿En qué puedo ayudarte?*\n\n` +
+            `🛍️ *Ver productos:* Escribe *CATALOGO*\n` +
+            `🛒 *Hacer pedido:* Escribe lo que necesitas\n` +
+            `💰 *Consultar precio:* "¿Cuánto cuesta X?"\n` +
+            `📊 *Ver pedido:* Escribe *ESTADO*\n` +
+            `❓ *Ayuda:* Escribe *AYUDA*\n\n` +
+            `💡 También puedes enviarme una nota de voz.`
+          );
+          responseSent = true;
+        }
+      } catch (sendError) {
+        logger.error(`❌ [TEXTO] Error al enviar respuesta del NLU:`, sendError);
+        // Último intento de enviar mensaje
+        try {
+          await this.sendMessage(jidToUse, 
+            `😅 Lo siento, hubo un problema. Por favor intenta de nuevo o escribe *AYUDA*.`
+          );
+        } catch (finalError) {
+          logger.error(`❌ [TEXTO] Error crítico: No se pudo enviar mensaje final`, finalError);
+        }
+      }
+      
+      logger.info(`📝 [TEXTO] Procesamiento de mensaje de texto completado`);
+
+    } catch (error) {
+      logger.error('═══════════════════════════════════════════════════════════');
+      logger.error('❌ [TEXTO] ERROR CRÍTICO al procesar mensaje de texto');
+      logger.error(`❌ [TEXTO] Error: ${error.message}`);
+      logger.error(`❌ [TEXTO] Stack: ${error.stack?.substring(0, 1000)}`);
+      logger.error(`❌ [TEXTO] Phone: ${phoneNumber}, JID: ${jidToUse}`);
+      logger.error(`❌ [TEXTO] Texto: "${text.substring(0, 100)}"`);
+      logger.error('═══════════════════════════════════════════════════════════');
+      
+      // SIEMPRE intentar enviar una respuesta, incluso en caso de error
+      let responseSent = false;
+      
+      // Intentar recuperación inteligente con timeout
+      try {
+        logger.info(`📝 [TEXTO] Intentando recuperación inteligente...`);
+        const intentDetector = require('./utils/intentDetector');
+        const fallbackPromise = intentDetector.detectIntent(text, { state: 'idle' }, []);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout en recuperación')), 5000)
+        );
+        
+        const fallbackIntent = await Promise.race([fallbackPromise, timeoutPromise]);
+        
+        logger.info(`📝 [TEXTO] Intención de fallback detectada: ${fallbackIntent.intent} (confianza: ${fallbackIntent.confidence})`);
         
         // Si se puede detectar la intención, responder apropiadamente
         if (fallbackIntent.intent !== 'unknown' && fallbackIntent.confidence > 0.5) {
@@ -1405,6 +2368,7 @@ class WhatsAppHandler {
               `❓ *Ayuda:* Escribe *AYUDA*\n\n` +
               `💡 Si el problema persiste, intenta enviar tu mensaje de nuevo.`
             );
+            responseSent = true;
           } else if (fallbackIntent.intent === 'greeting') {
             await this.sendMessage(jidToUse,
               `👋 *¡Hola! ¡Bienvenido a KARDEX!* 👋\n\n` +
@@ -1413,16 +2377,17 @@ class WhatsAppHandler {
               `• *SÍ* si ya tienes una cuenta registrada\n` +
               `• *NO* si no tienes cuenta`
             );
-          } else {
-            // Respuesta genérica pero útil
-            await this.sendMessage(jidToUse,
-              `😅 Hubo un problema al procesar tu mensaje.\n\n` +
-              `Por favor, intenta de nuevo o escribe *AYUDA* para ver las opciones disponibles.\n\n` +
-              `💡 Si el problema persiste, intenta reformular tu mensaje.`
-            );
+            responseSent = true;
           }
-        } else {
-          // Si no se puede detectar, mensaje genérico pero amigable
+        }
+      } catch (recoveryError) {
+        logger.error(`❌ [TEXTO] Error en recuperación inteligente: ${recoveryError.message}`);
+      }
+      
+      // Si no se envió respuesta, enviar mensaje genérico
+      if (!responseSent) {
+        try {
+          logger.info(`📝 [TEXTO] Enviando mensaje de error genérico...`);
           await this.sendMessage(jidToUse, 
             `😅 Lo siento, hubo un error al procesar tu mensaje.\n\n` +
             `💡 Por favor intenta:\n` +
@@ -1431,18 +2396,25 @@ class WhatsAppHandler {
             `• O enviar un mensaje de texto más claro\n\n` +
             `🔄 Si el problema persiste, intenta de nuevo en unos momentos.`
           );
-        }
-      } catch (recoveryError) {
-        logger.error('❌ Error en recuperación:', recoveryError);
-        // Último fallback: mensaje simple
-        try {
-          await this.sendMessage(jidToUse, 
-            `😅 Lo siento, hubo un error. Por favor intenta de nuevo o escribe *AYUDA*.`
-          );
+          responseSent = true;
         } catch (sendError) {
-          logger.error('❌ Error crítico: No se pudo enviar mensaje de error', sendError);
+          logger.error(`❌ [TEXTO] Error crítico: No se pudo enviar mensaje de error`, {
+            error: sendError.message,
+            stack: sendError.stack?.substring(0, 500)
+          });
+          
+          // Último intento con mensaje muy simple
+          try {
+            await this.sendMessage(jidToUse, 
+              `😅 Error. Escribe *AYUDA*.`
+            );
+          } catch (finalError) {
+            logger.error(`❌ [TEXTO] ERROR CRÍTICO: No se pudo enviar ningún mensaje`, finalError);
+          }
         }
       }
+      
+      logger.info(`📝 [TEXTO] Manejo de error completado, respuesta enviada: ${responseSent}`);
     }
   }
 
@@ -1541,12 +2513,18 @@ class WhatsAppHandler {
    * Procesar mensaje de voz (versión Baileys)
    */
   async processVoiceMessageBaileys(phoneNumber, audioMessage, remoteJid = null) {
+    const jidToUse = remoteJid || (phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`);
     let audioPath = null;
+    let transcription = undefined;
+    
+    // Log detallado al inicio
+    logger.info('═══════════════════════════════════════════════════════════');
+    logger.info('🎤 [VOZ] Iniciando procesamiento de mensaje de voz');
+    logger.info(`🎤 [VOZ] Phone: ${phoneNumber}, JID: ${jidToUse}`);
+    logger.info(`🎤 [VOZ] Timestamp: ${new Date().toISOString()}`);
+    
     try {
-      // Usar remoteJid original si está disponible, de lo contrario construir JID
-      const jidToUse = remoteJid || (phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`);
-      
-      logger.info('🎤 Procesando mensaje de voz...');
+      logger.info('🎤 [VOZ] Procesando mensaje de voz...');
       await this.sendMessage(jidToUse, '🎤 Procesando tu mensaje de voz...');
 
       // Descargar audio
@@ -1661,11 +2639,17 @@ class WhatsAppHandler {
         return;
       }
 
-      // Mostrar al usuario qué entendió el bot (mejora la experiencia)
-      await this.sendMessage(jidToUse, `🎤 Entendí: "${transcription}"`);
+      // Usar el corrector de transcripciones robusto
+      const transcriptionCorrector = require('./utils/transcriptionCorrector');
+      
+      // Aplicar correcciones exhaustivas a la transcripción
+      let transcriptionCorregida = transcriptionCorrector.corregir(transcription);
+      
+      // Mostrar al usuario qué entendió el bot (con correcciones aplicadas)
+      await this.sendMessage(jidToUse, `🎤 Entendí: "${transcriptionCorregida}"`);
 
-      // Guardar transcripción en historial
-      await sessionManager.saveMessage(phoneNumber, 'voice', transcription, false);
+      // Guardar transcripción corregida en historial
+      await sessionManager.saveMessage(phoneNumber, 'voice', transcriptionCorregida, false);
 
       // Obtener sesión e historial
       let session = await sessionManager.getSession(phoneNumber);
@@ -1677,11 +2661,207 @@ class WhatsAppHandler {
       const stateObj = session.current_order ? JSON.parse(session.current_order) : {};
       const currentState = session.state || sessionManager.STATES.IDLE;
       
-      // PRIORIDAD ABSOLUTA 0: Si es CONFIRMO, procesar confirmación DIRECTAMENTE
-      const confirmPattern = /(?:confirmo|confirmar|confirma|si|sí|ok|okay|acepto|aceptar|yes)/i;
-      const isConfirm = confirmPattern.test(transcription) && transcription.length < 20; // Solo si es corto (no análisis)
+      // Usar transcripción corregida para el resto del procesamiento
+      transcription = transcriptionCorregida;
       
-      if (isConfirm && (currentState === sessionManager.STATES.PEDIDO_EN_PROCESO || currentState === sessionManager.STATES.AWAITING_CONFIRMATION)) {
+      // VERIFICACIÓN PRIORITARIA: Si el usuario ya está autenticado y dice "si soy cliente"
+      const isAuthenticated = stateObj._authenticated === true || !!stateObj._user_token;
+      if (isAuthenticated) {
+        const transcriptionLower = transcription.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
+        
+        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
+        const isYes = yesKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return transcriptionLower === keywordLower || 
+                 transcriptionLower.startsWith(keywordLower) || 
+                 transcriptionLower.includes(keywordLower) ||
+                 transcriptionLower.endsWith(keywordLower) ||
+                 (transcriptionLower.includes('si') && transcriptionLower.includes('cliente')) ||
+                 (transcriptionLower.includes('sí') && transcriptionLower.includes('cliente'));
+        });
+        
+        if (isYes) {
+          const clientName = stateObj._client_name || 'Cliente';
+          await this.sendMessage(jidToUse,
+            `✅ *Ya confirmamos que eres cliente registrado, *${clientName}*.* ✅\n\n` +
+            `🎯 *¿En qué podemos ayudarte?*\n\n` +
+            `🛍️ Ver catálogo: escribe *CATALOGO*\n` +
+            `🛒 Hacer pedido: escribe tu pedido\n` +
+            `📊 Ver mis pedidos: escribe *MIS PEDIDOS*\n` +
+            `❓ Ayuda: escribe *AYUDA*`
+          );
+          return;
+        }
+      }
+      
+      // FLUJO 0.5: Si está esperando método de pago
+      if (currentState === sessionManager.STATES.AWAITING_PAYMENT_METHOD) {
+        const intencion = transcriptionCorrector.detectarIntencion(transcription);
+        const transcriptionLower = transcription.toLowerCase().trim();
+        
+        // Mapeo de intenciones a métodos de pago
+        const metodosPago = {
+          'pago_transferencia': 'TRANSFERENCIA',
+          'pago_efectivo': 'EFECTIVO',
+          'pago_yape': 'YAPE',
+          'pago_plin': 'PLIN'
+        };
+        
+        // Buscar método de pago usando el corrector
+        let metodoSeleccionado = metodosPago[intencion] || null;
+        
+        // Si no se detectó por intención, buscar por palabras clave
+        if (!metodoSeleccionado) {
+          if (transcriptionCorrector.coincide(transcriptionLower, transcriptionCorrector.correcciones.transferencia)) {
+            metodoSeleccionado = 'TRANSFERENCIA';
+          } else if (transcriptionCorrector.coincide(transcriptionLower, transcriptionCorrector.correcciones.efectivo)) {
+            metodoSeleccionado = 'EFECTIVO';
+          } else if (transcriptionCorrector.coincide(transcriptionLower, transcriptionCorrector.correcciones.yape)) {
+            metodoSeleccionado = 'YAPE';
+          } else if (transcriptionCorrector.coincide(transcriptionLower, transcriptionCorrector.correcciones.plin)) {
+            metodoSeleccionado = 'PLIN';
+          }
+        }
+        
+        if (metodoSeleccionado) {
+          logger.info(`💳 [VOZ] Método de pago seleccionado: ${metodoSeleccionado}`);
+          
+          const pedidoId = stateObj.pedido_id || stateObj._pedido_id;
+          if (pedidoId) {
+            // Confirmar pedido con método de pago
+            const orderHandler = require('./orderHandler');
+            const sessionStateWithPayment = {
+              state: sessionManager.STATES.IDLE,
+              phoneNumber,
+              nombreCliente: stateObj._client_name || 'Cliente',
+              remoteJid: jidToUse,
+              authenticated: true,
+              user_token: stateObj._user_token,
+              _authenticated: true,
+              _user_token: stateObj._user_token,
+              _client_id: stateObj._client_id,
+              _client_name: stateObj._client_name,
+              pedido_id: pedidoId,
+              metodo_pago: metodoSeleccionado,
+              ...stateObj
+            };
+            
+            // Confirmar pedido con método de pago
+            await orderHandler.confirmOrder(phoneNumber, this, sessionStateWithPayment);
+            return;
+          } else {
+            await this.sendMessage(jidToUse,
+              `❌ No se encontró un pedido activo. Por favor, inicia un nuevo pedido.`
+            );
+            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+              ...stateObj,
+              _awaiting_payment_method: false
+            });
+            return;
+          }
+        } else {
+          await this.sendMessage(jidToUse,
+            `❌ Método de pago no reconocido.\n\n` +
+            `Por favor, *escribe* (no hables) uno de los siguientes métodos:\n\n` +
+            `• *TRANSFERENCIA* - Transferencia bancaria\n` +
+            `• *EFECTIVO* - Pago en efectivo\n` +
+            `• *YAPE* - Pago por Yape\n` +
+            `• *PLIN* - Pago por Plin\n\n` +
+            `O escribe *CANCELAR* para cancelar el pedido.`
+          );
+          return;
+        }
+      }
+      
+      // PRIORIDAD ABSOLUTA 0: Si es CONFIRMO, procesar confirmación DIRECTAMENTE
+      // Usar el corrector de transcripciones para detectar intención
+      const intencion = transcriptionCorrector.detectarIntencion(transcription);
+      const transcriptionLower = transcription.toLowerCase().trim();
+      
+      // Variantes comunes de "pedido" en transcripciones (ya corregidas)
+      const pedidoVariants = [
+        'pedido', 'periodo', 'perió', 'pevivo', 'teído', 'producto', 
+        'pediro', 'pedio', 'período', 'perido', 'pevido'
+      ];
+      
+      // Verificar si contiene palabras de confirmación usando el corrector
+      const hasConfirmKeyword = transcriptionCorrector.coincide(
+        transcriptionLower, 
+        transcriptionCorrector.correcciones.confirmo
+      );
+      
+      // Verificar si contiene variantes de "pedido"
+      const hasPedidoVariant = pedidoVariants.some(variant => 
+        transcriptionLower.includes(variant)
+      );
+      
+      // Detectar patrones específicos: "confirmar periodo", "confirmar perió", etc.
+      const explicitConfirmPattern = /confirmar?\s*(?:el\s*)?(?:pedido|periodo|perió|pevivo|teído|producto|pediro|pedio|período)/i;
+      const isExplicitConfirm = explicitConfirmPattern.test(transcription) || intencion === 'confirmar_pedido';
+      
+      // Verificar si hay un pedido activo (buscar en sesión primero)
+      let hasActiveOrder = await sessionManager.getActiveOrderId(phoneNumber);
+      
+      // Si no se encuentra en sesión, buscar en la BD directamente
+      if (!hasActiveOrder) {
+        try {
+          const kardexDb = require('./kardexDb');
+          if (kardexDb.isConnected()) {
+            const pool = kardexDb.getPool();
+            // Buscar el pedido más reciente en EN_PROCESO
+            const [pedidos] = await pool.execute(
+              `SELECT id, numero_pedido, cliente_id, estado FROM pedidos 
+               WHERE estado = 'EN_PROCESO' 
+               ORDER BY id DESC LIMIT 1`
+            );
+            
+            if (pedidos && pedidos.length > 0) {
+              hasActiveOrder = pedidos[0].id;
+              logger.info(`🔍 [VOZ] Pedido activo encontrado en BD: ${hasActiveOrder}`);
+            }
+          }
+        } catch (bdError) {
+          logger.error('Error al buscar pedido en BD:', bdError);
+        }
+      }
+      
+      // También verificar si hay pedido_id en el stateObj
+      if (!hasActiveOrder && (stateObj.pedido_id || stateObj._pedido_id)) {
+        hasActiveOrder = stateObj.pedido_id || stateObj._pedido_id;
+        logger.info(`🔍 [VOZ] Pedido activo encontrado en stateObj: ${hasActiveOrder}`);
+      }
+      
+      // Estados que indican que hay un pedido en proceso
+      const isInOrderState = currentState === sessionManager.STATES.PEDIDO_EN_PROCESO || 
+                             currentState === sessionManager.STATES.AWAITING_CONFIRMATION ||
+                             currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION ||
+                             hasActiveOrder;
+      
+      // Si tiene palabra de confirmación Y (variante de pedido O está en estado de pedido O hay pedido activo)
+      // También aceptar solo "confirmo/confirmar" si hay un pedido activo (para manejar transcripciones erróneas)
+      // Priorizar detección si hay pedido activo y dice alguna palabra de confirmación
+      const isConfirm = (hasConfirmKeyword && (hasPedidoVariant || isInOrderState || hasActiveOrder)) || 
+                        isExplicitConfirm ||
+                        (hasConfirmKeyword && hasActiveOrder); // Si dice "confirmo/confirmar" y hay pedido activo, aceptar siempre
+      
+      logger.info('🔍 Verificando confirmación', {
+        transcription: transcription.substring(0, 50),
+        hasConfirmKeyword,
+        hasPedidoVariant,
+        isExplicitConfirm,
+        isInOrderState,
+        hasActiveOrder,
+        currentState,
+        isConfirm
+      });
+      
+      // Procesar confirmación si se detecta Y (está en estado de pedido O hay pedido activo)
+      if (isConfirm && (isInOrderState || hasActiveOrder)) {
         logger.info('✅ PRIORIDAD: Confirmación de pedido detectada');
         try {
           const orderHandler = require('./orderHandler');
@@ -1691,6 +2871,7 @@ class WhatsAppHandler {
             nombreCliente: 'Cliente',
             remoteJid: jidToUse,
             authenticated: stateObj._authenticated || false,
+            pedido_id: hasActiveOrder,
             ...stateObj
           };
           await orderHandler.confirmOrder(phoneNumber, this, sessionStateWithPhone);
@@ -1703,8 +2884,15 @@ class WhatsAppHandler {
       
       // PRIORIDAD ABSOLUTA 1: Si es un PEDIDO, procesarlo DIRECTAMENTE
       // Detectar múltiples variaciones de pedidos (incluso con errores de transcripción)
-      const orderPattern = /(?:quiero hacer un pedido|quiero hacer pedido|quiero pedir|vamos a hacer un pedido|vamos a hacer pedido|vamos a pedir|va a ser un pedido|va a ser pedido|ser un pedido|ser pedido|necesito|quiero comprar|quiero|dame|deme|pedir|hacer pedido|comprar|ordenar|hacer una compra|hacer compra|necesito comprar|necesito pedir|pedidoss|pedidos)/i;
-      const isOrder = orderPattern.test(transcription);
+      // Incluir "quiera" porque Whisper a veces transcribe "quiero" como "quiera"
+      // Incluir "periodo", "pevivo", "pediro", "pedio" porque Whisper transcribe mal "pedido"
+      // EXCLUIR "confirmar pedido" que ya se maneja arriba
+      const isConfirmRequest = /confirmar?\s+(?:el\s+)?(?:pedido|periodo|pevivo)/i.test(transcription.trim());
+      // Patrón mejorado para detectar pedidos con errores de transcripción
+      const orderPattern = /(?:quiero hacer un (?:pedido|periodo|pevivo|pediro|pedio)|quiera hacer un (?:pedido|periodo|pevivo|pediro|pedio)|quiero hacer (?:pedido|periodo|pevivo)|quiera hacer (?:pedido|periodo|pevivo)|quiero pedir|quiera pedir|vamos a hacer un (?:pedido|periodo|pevivo)|vamos a hacer (?:pedido|periodo|pevivo)|vamos a pedir|va a ser un (?:pedido|periodo|pevivo)|va a ser (?:pedido|periodo|pevivo)|tras ser un (?:pedido|periodo|pevivo|período)|tras ser (?:pedido|periodo|pevivo|período)|ser un (?:pedido|periodo|pevivo)|hacer un (?:pedido|periodo|pevivo)|hacer (?:pedido|periodo|pevivo)|necesito comprar|quiero comprar|quiera comprar|hacer una compra|hacer compra|necesito pedir|pedidoss|pedidos de)/i;
+      // Detectar también: "va a ser un periodo de..." donde "periodo" = "pedido"
+      const periodOrderPattern = /(?:va a ser un?\s*(?:periodo|pedido|pevivo))\s+(?:de\s+)?(?:un|una|el|la)?/i;
+      const isOrder = (orderPattern.test(transcription) || periodOrderPattern.test(transcription)) && !isConfirmRequest;
       
       logger.info('🔍 Verificando si es pedido', {
         transcription: transcription.substring(0, 50),
@@ -1740,23 +2928,18 @@ class WhatsAppHandler {
                 const orderHandler = require('./orderHandler');
                 const cantidad = 1; // Por defecto 1, el usuario puede cambiar después
                 
-                // Agregar producto al pedido
-                await orderHandler.addProductToOrder(
+                // Agregar producto al pedido (addProductToOrder ya maneja los mensajes)
+                const result = await orderHandler.addProductToOrder(
                   phoneNumber, 
                   producto.id, 
                   cantidad, 
                   producto.nombre, 
-                  this // whatsappHandler
+                  this, // whatsappHandler
+                  jidToUse // JID correcto para enviar mensajes
                 );
                 
-                await this.sendMessage(jidToUse,
-                  `🛒 *Pedido iniciado*\n\n` +
-                  `Producto: *${producto.nombre}*\n` +
-                  `Cantidad: *${cantidad}*\n` +
-                  `Precio unitario: *S/ ${precio}*\n` +
-                  `Stock disponible: *${stock} unidades*\n\n` +
-                  `💬 ¿Confirmas este pedido? Responde *CONFIRMO* para continuar.`
-                );
+                // Solo enviar mensaje si addProductToOrder fue exitoso
+                // El mensaje de resumen ya fue enviado por addProductToOrder
                 return; // Salir inmediatamente
               } else {
                 await this.sendMessage(jidToUse,
@@ -1809,17 +2992,9 @@ class WhatsAppHandler {
                 
                 if (stock > 0) {
                   const orderHandler = require('./orderHandler');
+                  // addProductToOrder ya maneja los mensajes internamente
                   await orderHandler.addProductToOrder(phoneNumber, producto.id, 1, producto.nombre, this);
-                  
-                  await this.sendMessage(jidToUse,
-                    `🛒 *Pedido iniciado*\n\n` +
-                    `Producto: *${producto.nombre}*\n` +
-                    `Cantidad: *1*\n` +
-                    `Precio unitario: *S/ ${precio}*\n` +
-                    `Stock disponible: *${stock} unidades*\n\n` +
-                    `💬 ¿Confirmas este pedido? Responde *CONFIRMO* para continuar.`
-                  );
-                  return;
+                  return; // El mensaje ya fue enviado por addProductToOrder
                 }
               }
             }
@@ -1889,22 +3064,107 @@ class WhatsAppHandler {
       
       // FLUJO 0 (VOZ): Si está esperando confirmación si es cliente registrado (ANTES de cancelación universal)
       if (currentState === sessionManager.STATES.AWAITING_CLIENT_CONFIRMATION) {
-        const transcriptionLowerForYesNo = transcription.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo'];
-        const noKeywords = ['no', 'n', 'tampoco', 'no soy', 'no estoy'];
+        // Limpiar signos de puntuación y normalizar para mejor detección
+        const transcriptionLowerForYesNo = transcription.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
         
-        const isYes = yesKeywords.some(keyword => transcriptionLowerForYesNo === keyword || transcriptionLowerForYesNo.includes(keyword));
-        const isNo = noKeywords.some(keyword => transcriptionLowerForYesNo === keyword || transcriptionLowerForYesNo.includes(keyword));
+        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
+        const noKeywords = ['no', 'n', 'tampoco', 'no soy', 'no estoy', 'no tengo', 'no tengo cuenta'];
+        
+        logger.info(`🔍 [VOZ] Verificando confirmación de cliente - transcripción limpia: "${transcriptionLowerForYesNo}"`);
+        
+        // Detección mejorada: buscar keywords en la transcripción completa (sin signos de puntuación)
+        const isYes = yesKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return transcriptionLowerForYesNo === keywordLower || 
+                 transcriptionLowerForYesNo.includes(keywordLower) ||
+                 transcriptionLowerForYesNo.startsWith(keywordLower) ||
+                 transcriptionLowerForYesNo.endsWith(keywordLower) ||
+                 transcriptionLowerForYesNo.includes('si') && transcriptionLowerForYesNo.includes('cliente') ||
+                 transcriptionLowerForYesNo.includes('sí') && transcriptionLowerForYesNo.includes('cliente');
+        });
+        const isNo = noKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return transcriptionLowerForYesNo === keywordLower || 
+                 transcriptionLowerForYesNo.includes(keywordLower);
+        });
         
         if (isYes) {
-          // Usuario es cliente, pedir número
-          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PHONE, {});
-          await this.sendMessage(jidToUse,
-            `✅ Perfecto, eres cliente registrado.\n\n` +
-            `📞 Por favor, ingresa tu *número de teléfono* (9 dígitos):\n\n` +
-            `Ejemplo: *987654321* o *51987654321*`
-          );
-          return;
+          // Usuario es cliente, buscar automáticamente por el número del remitente
+          logger.info(`🔍 [VOZ] Usuario confirmó que es cliente, buscando por número del remitente: ${phoneNumber}`);
+          
+          // Extraer el número real del remitente (puede venir como JID completo)
+          let realPhoneForSearch = phoneNumber;
+          
+          // Si phoneNumber contiene @, extraer solo la parte numérica
+          if (phoneNumber.includes('@')) {
+            realPhoneForSearch = phoneNumber.split('@')[0];
+            logger.info(`🔍 [VOZ] Extraído número del JID: ${realPhoneForSearch}`);
+          }
+          
+          // Si el número es muy largo (más de 15 dígitos), probablemente es un ID interno, intentar obtener el número real
+          if (realPhoneForSearch.length > 15) {
+            logger.warn(`⚠️ [VOZ] Número muy largo (${realPhoneForSearch.length} dígitos), puede ser ID interno. Intentando obtener número real...`);
+            // Intentar obtener el número real desde el remoteJid si está disponible
+            if (remoteJid && remoteJid.includes('@lid')) {
+              try {
+                // Buscar en cache de contactos
+                if (this.contacts && this.contacts[remoteJid]) {
+                  const contact = this.contacts[remoteJid];
+                  if (contact.jid) {
+                    realPhoneForSearch = contact.jid.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                    logger.info(`✅ [VOZ] Número real obtenido desde cache: ${realPhoneForSearch}`);
+                  } else if (contact.id) {
+                    realPhoneForSearch = contact.id.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                    logger.info(`✅ [VOZ] Número real obtenido desde cache (id): ${realPhoneForSearch}`);
+                  }
+                }
+              } catch (contactError) {
+                logger.warn(`⚠️ [VOZ] Error al obtener número real: ${contactError.message}`);
+              }
+            }
+          }
+          
+          // Normalizar el número del remitente
+          const PhoneNormalizer = require('./utils/phoneNormalizer');
+          const kardexApi = require('./kardexApi');
+          const remitenteNormalized = PhoneNormalizer.normalize(realPhoneForSearch);
+          logger.info(`🔍 [VOZ] Número del remitente normalizado: ${remitenteNormalized} (original: ${realPhoneForSearch})`);
+          
+          // Buscar cliente por el número del remitente
+          const clienteRemitente = await kardexApi.getClientByPhone(remitenteNormalized);
+          
+          if (clienteRemitente) {
+            // Cliente encontrado por número del remitente
+            logger.info(`✅ [VOZ] Cliente encontrado por número del remitente: ${clienteRemitente.nombre}`);
+            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PASSWORD, {
+              _client_id: clienteRemitente.id,
+              _client_phone: remitenteNormalized,
+              _client_name: clienteRemitente.nombre
+            });
+            await this.sendMessage(jidToUse,
+              `✅ Ya confirmamos que eres cliente registrado, *${clienteRemitente.nombre}*.\n\n` +
+              `🔐 Por favor, *escribe* tu *contraseña* para acceder a tu cuenta.\n\n` +
+              `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
+              `💡 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
+              `💡 O si quieres hacer un pedido sin ingresar, escribe *PEDIDO*`
+            );
+            return;
+          } else {
+            // Cliente no encontrado por número del remitente, pedir número manualmente
+            logger.warn(`⚠️ [VOZ] Cliente no encontrado por número del remitente: ${remitenteNormalized}`);
+            await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PHONE, {});
+            await this.sendMessage(jidToUse,
+              `✅ Perfecto, eres cliente registrado.\n\n` +
+              `📞 Por favor, ingresa tu *número de teléfono* registrado (9 dígitos):\n\n` +
+              `Ejemplo: *987654321* o *51987654321*`
+            );
+            return;
+          }
         } else if (isNo) {
           // Usuario NO es cliente, mostrar opciones
           await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {});
@@ -1931,10 +3191,71 @@ class WhatsAppHandler {
         }
       }
       
-      // FLUJO ESPECIAL: Si está esperando contraseña y dice que olvidó su contraseña
+      // FLUJO ESPECIAL (VOZ): Si está esperando contraseña - DEBE ESTAR ANTES DE AWAITING_PHONE
       if (currentState === sessionManager.STATES.AWAITING_PASSWORD) {
-        // Detectar si el usuario dice que olvidó su contraseña
-        const transcriptionLower = transcription.toLowerCase().trim();
+        // Limpiar transcripción para mejor detección
+        const transcriptionLower = transcription.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
+        
+        // PRIORIDAD 1: Detectar CANCELAR (incluyendo variantes de transcripción)
+        const cancelKeywords = [
+          'cancelar', 'cancel', 'cancela', 'cancelar todo', 'cancelar operacion',
+          'gonzilar', 'gonzillar', 'gonzil', 'cancilar', 'cancillar', // Variantes de transcripción
+          'volver', 'volver atras', 'volver atrás', 'inicio', 'salir'
+        ];
+        const isCancel = cancelKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return transcriptionLower === keywordLower || 
+                 transcriptionLower.includes(keywordLower) ||
+                 transcriptionLower.startsWith(keywordLower) ||
+                 transcriptionLower.endsWith(keywordLower);
+        });
+        
+        if (isCancel) {
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+            _input_phone: undefined,
+            _client_id: undefined,
+            _client_phone: undefined,
+            _client_name: undefined
+          });
+          await this.sendMessage(jidToUse,
+            '❌ Verificación cancelada.\n\n' +
+            '💬 Escribe *HOLA* para comenzar de nuevo.'
+          );
+          return;
+        }
+        
+        // PRIORIDAD 2: Detectar "si soy cliente" o variantes (por si el usuario se confundió)
+        const yesKeywords = ['si', 'sí', 's', 'yes', 'y', 'cliente', 'registrado', 'tengo cuenta', 'ya tengo', 'si soy', 'si soy cliente', 'soy cliente', 'soy registrado', 'si estoy', 'sí soy', 'sí soy cliente'];
+        const isYes = yesKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return transcriptionLower === keywordLower || 
+                 transcriptionLower.includes(keywordLower) ||
+                 transcriptionLower.startsWith(keywordLower) ||
+                 transcriptionLower.endsWith(keywordLower) ||
+                 (transcriptionLower.includes('si') && transcriptionLower.includes('cliente')) ||
+                 (transcriptionLower.includes('sí') && transcriptionLower.includes('cliente'));
+        });
+        
+        if (isYes) {
+          // El usuario dice "si soy cliente" pero ya está en flujo de contraseña
+          // Esto significa que ya confirmó antes, solo necesita la contraseña
+          const clientName = stateObj._client_name || 'Cliente';
+          await this.sendMessage(jidToUse,
+            `✅ Ya confirmamos que eres cliente registrado, *${clientName}*.\n\n` +
+            '🔐 Ahora necesitamos tu *contraseña* para acceder a tu cuenta.\n\n' +
+            '🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n' +
+            '💡 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"*\n' +
+            '❌ O escribe *CANCELAR* para volver al inicio.'
+          );
+          return;
+        }
+        
+        // PRIORIDAD 3: Detectar si el usuario dice que olvidó su contraseña
         const forgotPasswordKeywords = [
           'olvide', 'olvidé', 'olvido', 'olvidó', 'olvido mi contraseña',
           'olvide contraseña', 'olvidé contraseña', 'no recuerdo',
@@ -1958,8 +3279,8 @@ class WhatsAppHandler {
           const smsCode = smsService.generateVerificationCode();
           const codeExpiresAt = Date.now() + (10 * 60 * 1000); // 10 minutos
           
-          // Intentar enviar SMS
-          const smsSent = await smsService.sendVerificationCode(clientPhone, smsCode);
+          // Intentar enviar SMS (en desarrollo, se envía por WhatsApp)
+          const smsSent = await smsService.sendVerificationCode(clientPhone, smsCode, this, jidToUse);
           
           if (smsSent) {
             // Guardar código en sesión
@@ -1974,9 +3295,10 @@ class WhatsAppHandler {
               `🔐 *Recuperación de contraseña* 🔐\n\n` +
               `Hola *${clientName}*,\n\n` +
               `📱 Hemos enviado un código de verificación de 6 dígitos a tu número de teléfono *${PhoneNormalizer.format(clientPhone)}*.\n\n` +
-              `🔢 Por favor, ingresa el código que recibiste por SMS:\n\n` +
+              `💬 *También te lo enviamos por WhatsApp arriba.*\n\n` +
+              `🔢 Por favor, ingresa el código que recibiste:\n\n` +
               `⏰ *El código expira en 10 minutos.*\n\n` +
-              `❌ Si no recibiste el código, escribe *CANCELAR* y contacta con soporte.`
+              `❌ Si no recibiste el código, escribe *CANCELAR* para volver al inicio.`
             );
           } else {
             // Error al enviar SMS, ofrecer alternativa
@@ -1989,8 +3311,235 @@ class WhatsAppHandler {
           return;
         }
         
-        // Si no es "olvidé contraseña", tratar como contraseña normal
-        // El flujo normal lo manejará después con NLU
+        // Si no es "olvidé contraseña", el usuario está intentando enviar contraseña por voz
+        // Por seguridad, no aceptamos contraseñas por voz
+        await this.sendMessage(jidToUse,
+          '🔒 *Por seguridad, no aceptamos contraseñas por audio.*\n\n' +
+          '📝 Por favor, *escribe* tu contraseña por texto para acceder a tu cuenta.\n\n' +
+          '💡 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación.\n\n' +
+          '❌ O escribe *CANCELAR* para volver al inicio.'
+        );
+        return;
+      }
+      
+      // FLUJO 1 (VOZ): Si está esperando número de teléfono
+      if (currentState === sessionManager.STATES.AWAITING_PHONE) {
+        const PhoneNormalizer = require('./utils/phoneNormalizer');
+        const kardexApi = require('./kardexApi');
+        const kardexDb = require('./kardexDb');
+        
+        // PRIORIDAD: Detectar CANCELAR antes de procesar como número
+        const transcriptionLower = transcription.toLowerCase()
+          .trim()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+          .replace(/[¡!¿?.,;:]/g, '') // Quitar signos de puntuación
+          .trim();
+        
+        const cancelKeywords = [
+          'cancelar', 'cancel', 'cancela', 'cancelar todo', 'cancelar operacion',
+          'gonzilar', 'gonzillar', 'gonzil', 'cancilar', 'cancillar', // Variantes de transcripción
+          'volver', 'volver atras', 'volver atrás', 'inicio', 'salir'
+        ];
+        const isCancel = cancelKeywords.some(keyword => {
+          const keywordLower = keyword.toLowerCase();
+          return transcriptionLower === keywordLower || 
+                 transcriptionLower.includes(keywordLower) ||
+                 transcriptionLower.startsWith(keywordLower) ||
+                 transcriptionLower.endsWith(keywordLower);
+        });
+        
+        if (isCancel) {
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+            _input_phone: undefined,
+            _client_id: undefined,
+            _client_phone: undefined,
+            _client_name: undefined
+          });
+          await this.sendMessage(jidToUse,
+            '❌ Operación cancelada.\n\n' +
+            '💬 Escribe *HOLA* para comenzar de nuevo.'
+          );
+          return;
+        }
+        
+        // Limpiar transcripción de voz: quitar TODOS los caracteres que no sean números
+        // Whisper a veces transcribe "9 9 3 0 4 3 1 1 2" o "99, 30, 43, 1, 1, 2" o "99-30-43-1-1-2" o "99,30,4312" o "9-9-3-0-4-3-1-1"
+        // Usar una expresión más agresiva: solo dejar números
+        const cleanedText = transcription.replace(/[^0-9]/g, '');
+        logger.info(`📞 [VOZ] Número recibido (original): "${transcription}" -> (limpio): "${cleanedText}"`);
+        
+        // Si después de limpiar no hay números, es un error
+        if (!cleanedText || cleanedText.length === 0) {
+          await this.sendMessage(jidToUse, 
+            '❌ No pude detectar un número de teléfono en tu mensaje.\n\n' +
+            '💡 Por favor, dicta tu número claramente, por ejemplo: "9 9 3 0 4 3 1 1 2"\n\n' +
+            '❌ O di *CANCELAR* para volver al inicio.'
+          );
+          return;
+        }
+        
+        const phoneInput = PhoneNormalizer.normalize(cleanedText);
+        if (!PhoneNormalizer.isValidPeruvianPhone(phoneInput)) {
+          await this.sendMessage(jidToUse, 
+            `❌ El número de teléfono no es válido.\n\n` +
+            `📞 Detecté: *${cleanedText}*\n\n` +
+            `Por favor, ingresa un número de 9 dígitos (ejemplo: 987654321) o con código de país (51987654321).`
+          );
+          return;
+        }
+        
+        // Actualizar sesión con el número ingresado
+        await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+          _input_phone: phoneInput
+        });
+        
+        // Buscar cliente con el número ingresado
+        let cliente = null;
+        if (kardexDb.isConnected()) {
+          cliente = await kardexDb.buscarClientePorTelefono(phoneInput);
+        }
+        if (!cliente) {
+          cliente = await kardexApi.getClientByPhone(phoneInput);
+        }
+        
+        if (cliente && cliente.nombre) {
+          // Cliente encontrado, pedir contraseña
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_PASSWORD, {
+            _input_phone: phoneInput,
+            _client_id: cliente.id,
+            _client_phone: phoneInput,
+            _client_name: cliente.nombre
+          });
+          await this.sendMessage(jidToUse,
+            `✅ Cliente encontrado: *${cliente.nombre}*\n\n` +
+            `🔐 Por favor, *escribe* tu *contraseña* para acceder a tu cuenta.\n\n` +
+            `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
+            `💡 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"*`
+          );
+        } else {
+          // Cliente no encontrado, ofrecer registro
+          await this.sendMessage(jidToUse,
+            `❌ No encontramos una cuenta registrada con el número *${PhoneNormalizer.format(phoneInput)}*.\n\n` +
+            `📋 *¿Qué deseas hacer?*\n\n` +
+            `1️⃣ *REGISTRAR* - Crear una cuenta nueva\n` +
+            `2️⃣ *PEDIDO* - Hacer un pedido sin cuenta\n` +
+            `3️⃣ *CATALOGO* - Ver productos disponibles\n\n` +
+            `💡 También puedes escribir *CANCELAR* para volver al inicio.`
+          );
+        }
+        return;
+      }
+      
+      // FLUJO 2.5 (VOZ): Si está esperando código SMS de verificación
+      if (currentState === sessionManager.STATES.AWAITING_SMS_CODE) {
+        const transcriptionLower = transcription.toLowerCase().trim();
+        
+        // Si dice CANCELAR, volver al inicio
+        if (transcriptionLower === 'cancelar' || transcriptionLower === 'cancel' || transcriptionLower.includes('cancelar')) {
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+            ...stateObj,
+            _sms_code: undefined,
+            _sms_code_expires: undefined,
+            _sms_attempts: undefined
+          });
+          await this.sendMessage(jidToUse, 
+            '❌ Verificación cancelada.\n\n' +
+            '💬 Escribe *HOLA* para comenzar de nuevo.'
+          );
+          return;
+        }
+        
+        // Extraer código numérico del mensaje
+        const codeMatch = transcription.match(/\d{6}/);
+        const enteredCode = codeMatch ? codeMatch[0] : transcription.replace(/[^0-9]/g, '');
+        
+        if (enteredCode.length !== 6) {
+          const attempts = (stateObj._sms_attempts || 0) + 1;
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_SMS_CODE, {
+            ...stateObj,
+            _sms_attempts: attempts
+          });
+          
+          if (attempts >= 3) {
+            await this.sendMessage(jidToUse,
+              `❌ Has excedido el número de intentos.\n\n` +
+              `Por favor, di *"olvidé mi contraseña"* nuevamente para recibir un nuevo código, o di *CANCELAR* para volver al inicio.`
+            );
+            return;
+          }
+          
+          await this.sendMessage(jidToUse,
+            `❌ Código inválido. Por favor, ingresa el código de 6 dígitos que recibiste.\n\n` +
+            `Ejemplo: *123456*\n\n` +
+            `⏰ Recuerda que el código expira en 10 minutos.\n` +
+            `❌ Di *CANCELAR* si no recibiste el código.`
+          );
+          return;
+        }
+        
+        // Verificar código
+        const storedCode = stateObj._sms_code;
+        const codeExpires = stateObj._sms_code_expires || 0;
+        const attempts = (stateObj._sms_attempts || 0) + 1;
+        
+        // Verificar si el código expiró
+        if (Date.now() > codeExpires) {
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_SMS_CODE, {
+            ...stateObj,
+            _sms_code: undefined,
+            _sms_code_expires: undefined,
+            _sms_attempts: undefined
+          });
+          await this.sendMessage(jidToUse,
+            `⏰ El código ha expirado.\n\n` +
+            `Por favor, di *"olvidé mi contraseña"* nuevamente para recibir un nuevo código.`
+          );
+          return;
+        }
+        
+        // Verificar si el código es correcto
+        if (enteredCode === storedCode) {
+          // Código correcto, autenticar usuario
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.IDLE, {
+            ...stateObj,
+            _authenticated: true,
+            _user_token: stateObj._client_id ? `whatsapp_${stateObj._client_id}` : null,
+            _sms_verified: true,
+            _sms_code: undefined,
+            _sms_code_expires: undefined,
+            _sms_attempts: undefined
+          });
+          
+          await this.sendMessage(jidToUse,
+            `✅ *Código verificado correctamente*\n\n` +
+            `¡Bienvenido de nuevo, *${stateObj._client_name || 'Cliente'}*!\n\n` +
+            `Ahora puedes hacer pedidos y consultar tu información.\n\n` +
+            `💬 Escribe *PEDIDO* para hacer un pedido o *CATALOGO* para ver productos.`
+          );
+          return;
+        } else {
+          // Código incorrecto
+          await sessionManager.updateSessionState(phoneNumber, sessionManager.STATES.AWAITING_SMS_CODE, {
+            ...stateObj,
+            _sms_attempts: attempts
+          });
+          
+          if (attempts >= 3) {
+            await this.sendMessage(jidToUse,
+              `❌ Has excedido el número de intentos.\n\n` +
+              `Por favor, di *"olvidé mi contraseña"* nuevamente para recibir un nuevo código, o di *CANCELAR* para volver al inicio.`
+            );
+            return;
+          }
+          
+          await this.sendMessage(jidToUse,
+            `❌ Código incorrecto. Por favor, verifica el código que recibiste e ingrésalo nuevamente.\n\n` +
+            `💡 Recuerda que el código tiene 6 dígitos.\n` +
+            `❌ Di *CANCELAR* si no recibiste el código.`
+          );
+          return;
+        }
       }
 
       // Verificar si el usuario está autenticado, tiene datos temporales, O está en proceso de autenticación
@@ -2026,7 +3575,8 @@ class WhatsAppHandler {
           await this.sendMessage(jidToUse,
             `👋 ¡Hola *${clienteRemitente.nombre}*! 👋\n\n` +
             `Te reconocí por tu número de WhatsApp.\n\n` +
-            `Para acceder a tu cuenta y ver tus pedidos, por favor ingresa tu *contraseña* de la página web.\n\n` +
+            `Para acceder a tu cuenta y ver tus pedidos, por favor *escribe* tu *contraseña* de la página web.\n\n` +
+            `🔒 *Por seguridad, escribe tu contraseña por texto (no por audio).*\n\n` +
             `🔐 Si olvidaste tu contraseña, escribe *"olvidé mi contraseña"* y te enviaremos un código de verificación por SMS.\n\n` +
             `💡 O si quieres hacer un pedido sin ingresar, escribe *PEDIDO*`
           );
@@ -2114,6 +3664,13 @@ class WhatsAppHandler {
         };
       }
 
+      // NO procesar con NLU si está en AWAITING_PASSWORD (ya se manejó arriba)
+      // Esto evita que "cancelar" se interprete como "cancelar pedido"
+      if (currentState === sessionManager.STATES.AWAITING_PASSWORD) {
+        logger.info('⚠️ [VOZ] Estado AWAITING_PASSWORD ya procesado, no llamar NLU');
+        return; // Ya se manejó arriba, no continuar con NLU
+      }
+      
       // Procesar con NLU (marcar como mensaje de voz)
       // Pasar phoneNumber y nombreCliente en sessionState
       const sessionStateWithPhone = { 
@@ -2138,43 +3695,31 @@ class WhatsAppHandler {
         authenticated: stateObj._authenticated
       });
       
-      let nluResult;
+      let nluResult = null;
+      let nluError = null;
+      
+      // Procesar con NLU con timeout y manejo de errores robusto
       try {
-        nluResult = await nlu.processMessage(transcription, sessionStateWithPhone, conversationHistory, true);
-        logger.info(`🔍 NLU procesó voz: intent=${nluResult.intent}, tiene response=${!!nluResult.response}`);
+        logger.info(`🎤 [VOZ] Llamando a NLU para procesar transcripción...`);
+        const nluPromise = nlu.processMessage(transcription, sessionStateWithPhone, conversationHistory, true);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('NLU timeout después de 30 segundos')), 30000)
+        );
         
-        // Si no hay resultado o respuesta, usar IA conversacional directamente
-        if (!nluResult || !nluResult.response) {
-          logger.warn('⚠️ NLU no devolvió respuesta, usando IA conversacional');
-          try {
-            const conversationalResponse = await conversationalAI.generateResponse(
-              transcription,
-              sessionStateWithPhone,
-              conversationHistory,
-              'unknown'
-            );
-            
-            if (conversationalResponse) {
-              await this.sendMessage(jidToUse, conversationalResponse);
-              await sessionManager.saveMessage(phoneNumber, 'text', conversationalResponse, true);
-              return;
-            }
-          } catch (convError) {
-            logger.warn('Error en IA conversacional, intentando procesar como texto', convError);
-          }
-          
-          // Si la IA conversacional también falla, procesar como texto normal
-          await this.processTextMessage(phoneNumber, transcription, remoteJid);
-          return;
-        }
-      } catch (nluError) {
-        logger.error('❌ Error en NLU, usando IA conversacional como fallback', {
-          error: nluError.message,
-          stack: nluError.stack?.substring(0, 300),
-          transcription
+        nluResult = await Promise.race([nluPromise, timeoutPromise]);
+        logger.info(`🔍 [VOZ] NLU procesó voz: intent=${nluResult.intent}, tiene response=${!!nluResult.response}`);
+      } catch (nluErr) {
+        nluError = nluErr;
+        logger.error(`❌ [VOZ] Error en NLU:`, {
+          error: nluErr.message,
+          stack: nluErr.stack?.substring(0, 500)
         });
-        
-        // Si falla el NLU, usar IA conversacional directamente
+        // Continuar con fallback en lugar de lanzar error
+      }
+      
+      // Si no hay resultado o respuesta, usar IA conversacional directamente
+      if (!nluResult || !nluResult.response) {
+        logger.warn('⚠️ [VOZ] NLU no devolvió respuesta, usando IA conversacional');
         try {
           const conversationalResponse = await conversationalAI.generateResponse(
             transcription,
@@ -2184,28 +3729,29 @@ class WhatsAppHandler {
           );
           
           if (conversationalResponse) {
-            logger.success('✅ Respuesta generada por IA conversacional (fallback)');
+            logger.success('✅ [VOZ] Respuesta generada por IA conversacional (fallback)');
             await this.sendMessage(jidToUse, conversationalResponse);
             await sessionManager.saveMessage(phoneNumber, 'text', conversationalResponse, true);
             return;
           }
         } catch (convError) {
-          logger.warn('Error en IA conversacional, intentando procesar como texto', convError);
+          logger.warn('⚠️ [VOZ] Error en IA conversacional, intentando procesar como texto', convError);
         }
         
-        // Si la IA conversacional también falla, procesar como mensaje de texto normal
+        // Si la IA conversacional también falla, procesar como texto normal
         try {
           await this.processTextMessage(phoneNumber, transcription, remoteJid);
+          return;
         } catch (textError) {
-          logger.error('❌ Error al procesar como texto también', textError);
+          logger.error('❌ [VOZ] Error al procesar como texto también', textError);
           // Último fallback: respuesta básica
           await this.sendMessage(jidToUse, 
             `👋 ¡Hola! 👋\n\n` +
             `Entendí: "${transcription}"\n\n` +
             `¿En qué puedo ayudarte? Puedo ayudarte con productos, pedidos o cualquier consulta. 😊`
           );
+          return;
         }
-        return;
       }
 
       // Manejar respuesta del NLU
@@ -2268,73 +3814,77 @@ class WhatsAppHandler {
       }
 
     } catch (error) {
-      logger.error('❌ Error al procesar mensaje de voz:', {
-        error: error.message,
-        stack: error.stack?.substring(0, 500),
-        audioPath: audioPath || 'N/A',
-        transcription: typeof transcription !== 'undefined' ? transcription : 'N/A'
-      });
+      logger.error('═══════════════════════════════════════════════════════════');
+      logger.error('❌ [VOZ] ERROR CRÍTICO al procesar mensaje de voz');
+      logger.error(`❌ [VOZ] Error: ${error.message}`);
+      logger.error(`❌ [VOZ] Stack: ${error.stack?.substring(0, 1000)}`);
+      logger.error(`❌ [VOZ] Phone: ${phoneNumber}, JID: ${jidToUse}`);
+      logger.error(`❌ [VOZ] AudioPath: ${audioPath || 'N/A'}`);
+      logger.error(`❌ [VOZ] Transcription: ${typeof transcription !== 'undefined' ? transcription : 'N/A'}`);
+      logger.error('═══════════════════════════════════════════════════════════');
       
       // Limpiar archivo temporal si existe
       if (audioPath) {
         await fs.unlink(audioPath).catch(() => {});
       }
       
-      // Intentar recuperación inteligente
-      const jidToUse = remoteJid || (phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`);
+      // SIEMPRE intentar enviar una respuesta, incluso en caso de error
+      let responseSent = false;
       
       try {
         // Si tenemos una transcripción (incluso parcial), intentar procesarla
         if (typeof transcription !== 'undefined' && transcription && transcription.trim().length > 0) {
-          logger.info(`[Recovery] Intentando procesar transcripción: "${transcription}"`);
+          logger.info(`🎤 [VOZ] Intentando recuperación con transcripción: "${transcription}"`);
           
-          // Intentar procesar como mensaje de texto normal
+          // Intentar procesar como mensaje de texto normal con timeout
           try {
-            await this.processTextMessage(phoneNumber, transcription, remoteJid);
-            logger.info('[Recovery] ✅ Transcripción procesada exitosamente como texto');
+            const textProcessPromise = this.processTextMessage(phoneNumber, transcription, remoteJid);
+            const timeoutPromise = new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Timeout en procesamiento de texto')), 10000)
+            );
+            
+            await Promise.race([textProcessPromise, timeoutPromise]);
+            logger.info('🎤 [VOZ] ✅ Transcripción procesada exitosamente como texto');
+            responseSent = true;
             return; // Salir sin mostrar error
           } catch (textProcessError) {
-            logger.warn('[Recovery] Error al procesar transcripción como texto, intentando con intentDetector', textProcessError);
-            
-            // Intentar con intentDetector como último recurso
-            const intentDetector = require('./utils/intentDetector');
-            const session = await sessionManager.getSession(phoneNumber).catch(() => null);
-            const stateObj = session?.current_order ? JSON.parse(session.current_order) : {};
-            
-            const fallbackIntent = await intentDetector.detectIntent(transcription, { 
-              state: session?.state || 'idle',
-              ...stateObj 
-            }, []);
-            
-            if (fallbackIntent.intent !== 'unknown' && fallbackIntent.confidence > 0.4) {
-              logger.info(`[Recovery] Intención detectada: ${fallbackIntent.intent}`);
-              // Procesar como mensaje de texto normal
-              await this.processTextMessage(phoneNumber, transcription, remoteJid).catch(() => {});
-              return; // Salir sin mostrar error
-            }
+            logger.warn(`🎤 [VOZ] Error al procesar transcripción como texto: ${textProcessError.message}`);
           }
         }
         
         // Si no hay transcripción o no se pudo procesar, mensaje de error amigable
-        await this.sendMessage(jidToUse, 
-          `😅 Lo siento, no pude procesar tu mensaje de voz en este momento.\n\n` +
-          `💡 Por favor intenta:\n` +
-          `• Grabar el audio nuevamente (habla más claro y cerca del micrófono)\n` +
-          `• Enviar un mensaje de texto en su lugar\n` +
-          `• Escribir *AYUDA* para ver las opciones disponibles\n\n` +
-          `🔄 Si el problema persiste, intenta de nuevo en unos momentos.`
-        );
-      } catch (recoveryError) {
-        logger.error('❌ Error en recuperación de voz:', recoveryError);
-        // Último fallback
-        try {
+        if (!responseSent) {
+          logger.info(`🎤 [VOZ] Enviando mensaje de error amigable...`);
           await this.sendMessage(jidToUse, 
-            `😅 Lo siento, hubo un error. Por favor intenta enviar un mensaje de texto o escribe *AYUDA*.`
+            `😅 Lo siento, no pude procesar tu mensaje de voz en este momento.\n\n` +
+            `💡 Por favor intenta:\n` +
+            `• Grabar el audio nuevamente (habla más claro y cerca del micrófono)\n` +
+            `• Enviar un mensaje de texto en su lugar\n` +
+            `• Escribir *AYUDA* para ver las opciones disponibles\n\n` +
+            `🔄 Si el problema persiste, intenta de nuevo en unos momentos.`
           );
-        } catch (sendError) {
-          logger.error('❌ Error crítico: No se pudo enviar mensaje de error', sendError);
+          responseSent = true;
+        }
+      } catch (recoveryError) {
+        logger.error(`❌ [VOZ] Error en recuperación: ${recoveryError.message}`);
+        
+        // Último fallback
+        if (!responseSent) {
+          try {
+            await this.sendMessage(jidToUse, 
+              `😅 Lo siento, hubo un error. Por favor intenta enviar un mensaje de texto o escribe *AYUDA*.`
+            );
+            responseSent = true;
+          } catch (sendError) {
+            logger.error(`❌ [VOZ] ERROR CRÍTICO: No se pudo enviar ningún mensaje`, {
+              error: sendError.message,
+              stack: sendError.stack?.substring(0, 500)
+            });
+          }
         }
       }
+      
+      logger.info(`🎤 [VOZ] Manejo de error completado, respuesta enviada: ${responseSent}`);
     }
   }
 
@@ -2364,9 +3914,10 @@ class WhatsAppHandler {
   }
 
   async sendMessage(phoneNumberOrJid, text) {
+    const startTime = Date.now();
     try {
       if (!this.sock || !this.connected) {
-        logger.error('❌ No hay socket disponible o no está conectado');
+        logger.error('❌ [SEND] No hay socket disponible o no está conectado');
         return false;
       }
 
@@ -2377,16 +3928,28 @@ class WhatsAppHandler {
         jid = `${jid}@s.whatsapp.net`;
       }
 
-      logger.info(`📤 Enviando mensaje a ${jid}: ${text.substring(0, 50)}...`);
+      logger.info('═══════════════════════════════════════════════════════════');
+      logger.info(`📤 [SEND] Enviando mensaje`);
+      logger.info(`📤 [SEND] A: ${jid}`);
+      logger.info(`📤 [SEND] Texto: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+      logger.info(`📤 [SEND] Longitud: ${text.length} caracteres`);
 
       await this.sock.sendMessage(jid, { text });
 
-      logger.success(`✅ Mensaje enviado a ${jid}`);
+      const sendTime = Date.now() - startTime;
+      logger.success(`✅ [SEND] Mensaje enviado a ${jid} en ${sendTime}ms`);
+      logger.info('═══════════════════════════════════════════════════════════');
       return true;
 
     } catch (error) {
-      logger.error('❌ Error al enviar mensaje:', error);
-      logger.error(`   Intentó enviar a: ${phoneNumberOrJid}`);
+      const sendTime = Date.now() - startTime;
+      logger.error('═══════════════════════════════════════════════════════════');
+      logger.error('❌ [SEND] ERROR al enviar mensaje');
+      logger.error(`❌ [SEND] Error: ${error.message}`);
+      logger.error(`❌ [SEND] Intentó enviar a: ${phoneNumberOrJid}`);
+      logger.error(`❌ [SEND] Tiempo transcurrido: ${sendTime}ms`);
+      logger.error(`❌ [SEND] Stack: ${error.stack?.substring(0, 500)}`);
+      logger.error('═══════════════════════════════════════════════════════════');
       return false;
     }
   }

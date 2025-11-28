@@ -108,16 +108,81 @@ class OllamaClient {
       const jsonPrompt = `${prompt}\n\nResponde SOLO con un JSON válido, sin texto adicional.`;
       const response = await this.generate(jsonPrompt, systemPrompt, options);
       
-      // Intentar extraer JSON de la respuesta
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+      if (!response || typeof response !== 'string') {
+        throw new Error('Respuesta vacía o inválida de Ollama');
       }
       
-      // Si no hay match, intentar parsear directamente
-      return JSON.parse(response);
+      // Intentar extraer JSON de la respuesta (múltiples intentos)
+      let jsonData = null;
+      
+      // Intento 1: Buscar JSON entre llaves
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          jsonData = JSON.parse(jsonMatch[0]);
+          logger.debug('✅ JSON parseado exitosamente (método 1: match)');
+          return jsonData;
+        } catch (parseError) {
+          logger.warn('Error al parsear JSON del match, intentando otros métodos', parseError.message);
+        }
+      }
+      
+      // Intento 2: Buscar JSON entre corchetes (array)
+      const arrayMatch = response.match(/\[[\s\S]*\]/);
+      if (arrayMatch) {
+        try {
+          jsonData = JSON.parse(arrayMatch[0]);
+          logger.debug('✅ JSON parseado exitosamente (método 2: array)');
+          return jsonData;
+        } catch (parseError) {
+          logger.warn('Error al parsear JSON del array, intentando método directo', parseError.message);
+        }
+      }
+      
+      // Intento 3: Limpiar respuesta y parsear directamente
+      try {
+        // Remover markdown code blocks si existen
+        let cleanedResponse = response.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+        // Remover texto antes del primer { o [
+        cleanedResponse = cleanedResponse.replace(/^[^{[]*/, '');
+        // Remover texto después del último } o ]
+        cleanedResponse = cleanedResponse.replace(/[^}\]]*$/, '');
+        
+        jsonData = JSON.parse(cleanedResponse);
+        logger.debug('✅ JSON parseado exitosamente (método 3: limpieza)');
+        return jsonData;
+      } catch (parseError) {
+        logger.warn('Error al parsear JSON limpio, intentando parse directo', parseError.message);
+      }
+      
+      // Intento 4: Parsear directamente
+      try {
+        jsonData = JSON.parse(response.trim());
+        logger.debug('✅ JSON parseado exitosamente (método 4: directo)');
+        return jsonData;
+      } catch (parseError) {
+        logger.error('Error al parsear JSON directamente', {
+          error: parseError.message,
+          responsePreview: response.substring(0, 200)
+        });
+        throw new Error(`No se pudo parsear JSON: ${parseError.message}`);
+      }
     } catch (error) {
-      logger.error('Error al parsear JSON de Ollama', error);
+      logger.error('Error al parsear JSON de Ollama', {
+        error: error.message,
+        stack: error.stack?.substring(0, 500)
+      });
+      
+      // Si es un error de timeout, lanzar error específico
+      if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+        throw new Error('El procesamiento tardó demasiado. Por favor, intenta de nuevo.');
+      }
+      
+      // Si es un error de conexión, lanzar error específico
+      if (error.code === 'ECONNREFUSED' || error.message.includes('ECONNREFUSED')) {
+        throw new Error('Ollama no está disponible. Por favor, inicia el servicio.');
+      }
+      
       throw new Error('No se pudo obtener una respuesta válida del modelo');
     }
   }

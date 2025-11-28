@@ -16,25 +16,37 @@ class NLU {
    * @param {boolean} isFromVoice - Si el mensaje viene de transcripción de voz
    */
   async processMessage(text, sessionState = {}, conversationHistory = [], isFromVoice = false) {
+    const startTime = Date.now();
+    logger.info('═══════════════════════════════════════════════════════════');
+    logger.info('🧠 [NLU] Iniciando procesamiento de mensaje');
+    logger.info(`🧠 [NLU] Texto: "${(text || '').substring(0, 100)}"`);
+    logger.info(`🧠 [NLU] Estado: ${sessionState.state || 'idle'}`);
+    logger.info(`🧠 [NLU] Es voz: ${isFromVoice}`);
+    logger.info(`🧠 [NLU] Historial: ${conversationHistory.length} mensajes`);
+    
     try {
       const originalInput = text;
       
       // Normalizar/corregir siempre (mejora comprensión de voz y texto)
       text = textCorrector.correctText(text);
       
-      logger.info('Procesando mensaje NLU', { 
-        text: (text || '').substring(0, 100), 
-        sessionState: sessionState.state || 'idle',
-        isFromVoice,
-        historyLength: conversationHistory.length 
-      });
+      logger.info(`🧠 [NLU] Texto corregido: "${(text || '').substring(0, 100)}"`);
 
-      // Procesar TODO con UnifiedAIProcessor
-      const result = await unifiedAIProcessor.process(text, {
+      // Procesar TODO con UnifiedAIProcessor con timeout
+      logger.info(`🧠 [NLU] Llamando a unifiedAIProcessor...`);
+      const processorPromise = unifiedAIProcessor.process(text, {
         sessionState,
         conversationHistory,
         isFromVoice
       });
+      
+      // Timeout de 25 segundos para el procesador
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('UnifiedAIProcessor timeout después de 25 segundos')), 25000)
+      );
+      
+      const result = await Promise.race([processorPromise, timeoutPromise]);
+      logger.info(`🧠 [NLU] unifiedAIProcessor completado en ${Date.now() - startTime}ms`);
 
       // Convertir resultado a formato esperado por el resto del sistema
       // Formato compatible con basicBot y orderHandler
@@ -72,8 +84,8 @@ class NLU {
           response.response.fecha = result.data.fecha;
           response.response.hora = result.data.hora;
           response.response.metodoPago = result.data.metodoPago;
+          }
         }
-      }
 
       // Si hay acción pero no mensaje, el mensaje se generará en el handler
       if (result.action && !result.message) {
@@ -81,21 +93,30 @@ class NLU {
         response.response.message = null;
       }
 
-      logger.info('Procesamiento NLU completo', {
+      const processingTime = Date.now() - startTime;
+      logger.info(`🧠 [NLU] Procesamiento NLU completo en ${processingTime}ms`, {
         intent: response.intent,
         hasAction: !!result.action,
         hasMessage: !!result.message,
         action: result.action
       });
+      logger.info('═══════════════════════════════════════════════════════════');
 
       return response;
     } catch (error) {
-      logger.error('Error en NLU', error);
+      const processingTime = Date.now() - startTime;
+      logger.error('═══════════════════════════════════════════════════════════');
+      logger.error('❌ [NLU] ERROR al procesar mensaje');
+      logger.error(`❌ [NLU] Error: ${error.message}`);
+      logger.error(`❌ [NLU] Stack: ${error.stack?.substring(0, 500)}`);
+      logger.error(`❌ [NLU] Tiempo transcurrido: ${processingTime}ms`);
+      logger.error(`❌ [NLU] Texto original: "${(text || '').substring(0, 100)}"`);
+      logger.error('═══════════════════════════════════════════════════════════');
       
-      // Respuesta de error amigable
+      // SIEMPRE devolver una respuesta válida, incluso en caso de error
       return {
         intent: 'error',
-        originalText: text,
+        originalText: text || '',
         sessionState,
         response: {
           message: '😅 Lo siento, hubo un error al procesar tu mensaje.\n\n' +

@@ -27,7 +27,7 @@ class SMSService {
    * @param {string} code - Código de verificación
    * @returns {Promise<boolean>}
    */
-  async sendVerificationCode(phoneNumber, code) {
+  async sendVerificationCode(phoneNumber, code, whatsappHandler = null, jidToUse = null) {
     try {
       const message = `Tu código de verificación KARDEX es: ${code}\n\nEste código expira en 10 minutos. No lo compartas con nadie.`;
 
@@ -35,16 +35,33 @@ class SMSService {
         // Integración con Twilio
         return await this.sendWithTwilio(phoneNumber, message);
       } else {
-        // Modo desarrollo: solo loguear
-        logger.info('📱 SMS (Simulado)', {
+        // Modo desarrollo: enviar por WhatsApp como fallback
+        logger.info('📱 SMS (Simulado - Enviando por WhatsApp)', {
           to: phoneNumber,
-          message: `Código de verificación: ${code}`,
-          fullMessage: message
+          code: code
         });
         
-        // En desarrollo, también podemos enviar un mensaje de WhatsApp como fallback
-        // Esto es útil para pruebas
-        return true;
+        // En desarrollo, enviar el código por WhatsApp directamente
+        if (whatsappHandler && jidToUse) {
+          try {
+            await whatsappHandler.sendMessage(jidToUse,
+              `🔐 *Código de Verificación KARDEX*\n\n` +
+              `Tu código es: *${code}*\n\n` +
+              `⏰ Este código expira en 10 minutos.\n` +
+              `🔒 No lo compartas con nadie.`
+            );
+            logger.success(`✅ Código enviado por WhatsApp: ${code}`);
+            return true;
+          } catch (whatsappError) {
+            logger.error('Error al enviar código por WhatsApp', whatsappError);
+            // Continuar y retornar true de todas formas para que el flujo continúe
+            return true;
+          }
+        }
+        
+        // Si no hay whatsappHandler, solo loguear
+        logger.warn('⚠️ WhatsApp handler no disponible, código generado pero no enviado:', code);
+        return true; // Retornar true para que el flujo continúe
       }
     } catch (error) {
       logger.error('Error al enviar SMS de verificación', error);

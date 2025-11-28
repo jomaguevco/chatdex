@@ -362,10 +362,134 @@ class KardexDatabase {
   }
 
   /**
+   * Buscar TODOS los clientes con el mismo número de teléfono
+   */
+  async buscarTodosLosClientesPorTelefono(telefono) {
+    if (!this.pool) {
+      // Si no hay BD, intentar API
+      try {
+        const kardexApi = require('./kardexApi');
+        const clientes = await kardexApi.getClientes({ search: telefono, limit: 50 });
+        if (clientes && clientes.length > 0) {
+          // Filtrar por teléfono en los resultados
+          const clientesFiltrados = clientes.filter(c => {
+            const tel = (c.telefono || '').toString().replace(/[^0-9]/g, '');
+            const telInput = telefono.toString().replace(/[^0-9]/g, '');
+            return tel.includes(telInput) || telInput.includes(tel) || tel === telInput;
+          });
+          return clientesFiltrados || [];
+        }
+        return [];
+      } catch (error) {
+        logger.warn('No se pudo buscar clientes por API', error.message);
+        return [];
+      }
+    }
+
+    try {
+      // Normalizar número de teléfono (eliminar caracteres no numéricos excepto +)
+      let telefonoNormalizado = telefono.toString().replace(/[^0-9+]/g, '');
+      // Eliminar el + si existe
+      telefonoNormalizado = telefonoNormalizado.replace(/^\+/, '');
+      
+      logger.info(`🔍 Buscando TODOS los clientes por teléfono: ${telefono} -> normalizado: ${telefonoNormalizado}`);
+      
+      // Generar variantes del número para búsqueda flexible
+      let telefonos = [telefonoNormalizado];
+      
+      // Si el número incluye código de país (51), también buscar sin él
+      if (telefonoNormalizado.startsWith('51') && telefonoNormalizado.length >= 11) {
+        const sinCodigo = telefonoNormalizado.substring(2);
+        telefonos.push(sinCodigo);
+      }
+      
+      // Si no tiene código de país y tiene 9 dígitos, agregar código
+      if (!telefonoNormalizado.startsWith('51') && telefonoNormalizado.length === 9) {
+        const conCodigo = '51' + telefonoNormalizado;
+        telefonos.push(conCodigo);
+      }
+      
+      // También buscar solo los últimos 9 dígitos (sin código de país)
+      if (telefonoNormalizado.length >= 9) {
+        const ultimos9 = telefonoNormalizado.slice(-9);
+        if (!telefonos.includes(ultimos9)) {
+          telefonos.push(ultimos9);
+        }
+      }
+
+      // Eliminar duplicados
+      telefonos = [...new Set(telefonos)];
+      
+      logger.info(`🔍 Búsqueda con ${telefonos.length} variantes: ${telefonos.join(', ')}`);
+
+      // Buscar en base de datos con múltiples variantes
+      const searchConditions = telefonos.map(() => 
+        `(REPLACE(REPLACE(REPLACE(telefono, '+', ''), ' ', ''), '-', '') = ? OR 
+          REPLACE(REPLACE(REPLACE(telefono, '+', ''), ' ', ''), '-', '') LIKE ? OR 
+          telefono LIKE ? OR
+          telefono LIKE ?)`
+      ).join(' OR ');
+      
+      // Crear array de parámetros: para cada variante, múltiples búsquedas
+      const params = [];
+      telefonos.forEach(tel => {
+        params.push(tel); // Coincidencia exacta normalizada
+        params.push(`%${tel}%`); // LIKE en normalizado (contiene)
+        params.push(`%${tel}%`); // LIKE en original (contiene)
+        params.push(`%${tel}`); // LIKE en original (termina con)
+      });
+      
+      const query = `
+        SELECT 
+          id,
+          nombre,
+          tipo_documento,
+          numero_documento,
+          telefono,
+          email,
+          direccion,
+          tipo_cliente
+        FROM clientes
+        WHERE ${searchConditions}
+        ORDER BY 
+          CASE 
+            WHEN REPLACE(REPLACE(REPLACE(telefono, '+', ''), ' ', ''), '-', '') = ? THEN 1
+            WHEN REPLACE(REPLACE(REPLACE(telefono, '+', ''), ' ', ''), '-', '') LIKE ? THEN 2
+            ELSE 3
+          END,
+          nombre ASC
+      `;
+      
+      // Agregar parámetros para el ORDER BY (usar la primera variante)
+      params.push(telefonos[0], `%${telefonos[0]}%`);
+      
+      logger.debug(`🔍 Ejecutando query con ${params.length} parámetros`);
+      logger.debug(`🔍 Variantes buscadas: ${telefonos.join(', ')}`);
+      
+      const [rows] = await this.pool.execute(query, params);
+
+      if (rows && rows.length > 0) {
+        logger.info(`✅ Encontrados ${rows.length} cliente(s) para teléfono ${telefono}`);
+        return rows;
+      }
+
+      logger.warn(`⚠️ No se encontraron clientes para teléfono ${telefono} (variantes probadas: ${telefonos.join(', ')})`);
+      return [];
+    } catch (error) {
+      logger.error('Error al buscar todos los clientes por teléfono', error);
+      return [];
+    }
+  }
+
+  /**
    * Verificar si la conexión está activa
    */
   isConnected() {
     return this.pool !== null;
+  }
+
+  getPool() {
+    return this.pool;
   }
 }
 

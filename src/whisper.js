@@ -3,10 +3,17 @@ const path = require('path');
 const config = require('../config/config');
 const logger = require('./utils/logger');
 const audioConverter = require('./utils/audioConverter');
+const axios = require('axios');
+const FormData = require('form-data');
 
 class WhisperTranscriber {
   constructor() {
-    logger.info('✅ Whisper local configurado');
+    this.useAPI = config.whisper.use_api && config.whisper.api_key;
+    if (this.useAPI) {
+      logger.info('✅ Whisper configurado para usar OpenAI API (máxima precisión)');
+    } else {
+      logger.info('✅ Whisper local configurado');
+    }
   }
 
   /**
@@ -23,15 +30,99 @@ class WhisperTranscriber {
   }
 
   /**
-   * Transcribir audio usando Whisper local
+   * Transcribir audio (usa API si está configurada, sino usa local)
    */
   async transcribe(audioPath) {
     try {
-      logger.info('🎤 Transcribiendo audio con Whisper local...');
-      return await this._transcribeWithLocalWhisper(audioPath);
+      if (this.useAPI) {
+        logger.info('🎤 Transcribiendo audio con OpenAI Whisper API (máxima precisión)...');
+        return await this._transcribeWithAPI(audioPath);
+      } else {
+        logger.info('🎤 Transcribiendo audio con Whisper local...');
+        return await this._transcribeWithLocalWhisper(audioPath);
+      }
     } catch (error) {
       logger.error('Error en transcripción', error);
+      
+      // Si falla la API y hay fallback local, intentar con local
+      if (this.useAPI && config.whisper.api_key) {
+        logger.warn('⚠️ Falló transcripción con API, intentando con Whisper local como fallback...');
+        try {
+          return await this._transcribeWithLocalWhisper(audioPath);
+        } catch (fallbackError) {
+          logger.error('Error en transcripción local (fallback)', fallbackError);
+        }
+      }
+      
       throw new Error('No se pudo transcribir el audio');
+    }
+  }
+  
+  /**
+   * Transcribir usando OpenAI Whisper API (más preciso)
+   */
+  async _transcribeWithAPI(audioPath) {
+    try {
+      // Convertir a MP3 para mejor compatibilidad con OpenAI API
+      let processedAudioPath = audioPath;
+      if (!audioPath.endsWith('.mp3') && !audioPath.endsWith('.m4a') && !audioPath.endsWith('.wav')) {
+        logger.info('🔄 Convirtiendo audio a MP3 para OpenAI API...');
+        processedAudioPath = await audioConverter.convertToMp3(audioPath);
+        logger.success('✅ Audio convertido a MP3');
+      }
+      
+      const formData = new FormData();
+      const audioFile = await fs.readFile(processedAudioPath);
+      const contentType = processedAudioPath.endsWith('.mp3') ? 'audio/mpeg' : 
+                         processedAudioPath.endsWith('.m4a') ? 'audio/mp4' : 
+                         'audio/wav';
+      
+      formData.append('file', audioFile, {
+        filename: path.basename(processedAudioPath),
+        contentType: contentType
+      });
+      formData.append('model', 'whisper-1');
+      formData.append('language', config.whisper.language);
+      formData.append('response_format', 'text');
+      formData.append('temperature', config.whisper.temperature.toString());
+      formData.append('prompt', 'Esto es una conversación en español peruano sobre pedidos de productos. Habla de forma clara y natural.'); // Prompt para mejor reconocimiento
+      
+      logger.info('📤 Enviando audio a OpenAI Whisper API...');
+      
+      const response = await axios.post(
+        'https://api.openai.com/v1/audio/transcriptions',
+        formData,
+        {
+          headers: {
+            'Authorization': `Bearer ${config.whisper.api_key}`,
+            ...formData.getHeaders()
+          },
+          timeout: config.whisper.api_timeout,
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        }
+      );
+      
+      const transcription = response.data.trim();
+      
+      // Limpiar archivo temporal si se creó
+      if (processedAudioPath !== audioPath) {
+        await audioConverter.cleanupTempFiles([processedAudioPath]).catch(() => {});
+      }
+      
+      logger.success('✅ Transcripción completada con OpenAI Whisper API', { 
+        length: transcription.length,
+        preview: transcription.substring(0, 50) + '...'
+      });
+      
+      return transcription;
+    } catch (error) {
+      logger.error('Error en transcripción con API', {
+        error: error.message,
+        status: error.response?.status,
+        data: error.response?.data
+      });
+      throw error;
     }
   }
 
@@ -90,8 +181,13 @@ class WhisperTranscriber {
               '--output_dir', tempDir,
               '--temperature', config.whisper.temperature.toString(),
               '--beam_size', config.whisper.beam_size.toString(),
-              '--best_of', '5', // Mejorar calidad
-              '--patience', '1.0' // Reducir errores
+              '--best_of', config.whisper.best_of.toString(), // Mejorar calidad
+              '--patience', '1.0', // Reducir errores
+              '--condition_on_previous_text', 'True', // Mejor contexto
+              '--initial_prompt', 'Esto es una conversación en español peruano sobre pedidos de productos. Habla de forma clara y natural.', // Prompt inicial para mejor reconocimiento
+              '--compression_ratio_threshold', '2.4', // Filtrar transcripciones de baja calidad
+              '--logprob_threshold', '-1.0', // Filtrar por probabilidad
+              '--no_speech_threshold', '0.6' // Detectar mejor cuando hay silencio
             ];
 
       logger.debug('Ejecutando Whisper local', { args });

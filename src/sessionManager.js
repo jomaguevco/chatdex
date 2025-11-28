@@ -21,6 +21,7 @@ class SessionManager {
     AWAITING_CONFIRMATION: 'awaiting_confirmation',
     PEDIDO_EN_PROCESO: 'pedido_en_proceso',
     PEDIDO_CREADO: 'pedido_creado',
+    AWAITING_PAYMENT_METHOD: 'awaiting_payment_method', // Esperando método de pago (transferencia, efectivo, yape, plin)
     AWAITING_PAYMENT: 'awaiting_payment',
     PAGO_CONFIRMADO: 'pago_confirmado',
     COMPLETED: 'completed',

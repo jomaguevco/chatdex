@@ -10,7 +10,7 @@ class AudioConverter {
   }
 
   /**
-   * Convertir audio OGG/OPUS a WAV para Whisper
+   * Convertir audio OGG/OPUS a WAV para Whisper (con mejoras de calidad)
    */
   async convertToWav(inputPath, outputPath = null) {
     try {
@@ -19,14 +19,20 @@ class AudioConverter {
         outputPath = path.join(this.tempPath, `${filename}.wav`);
       }
 
-      logger.debug('Convirtiendo audio a WAV', { inputPath, outputPath });
+      logger.debug('Convirtiendo audio a WAV con mejoras de calidad', { inputPath, outputPath });
 
       return new Promise((resolve, reject) => {
         ffmpeg(inputPath)
           .toFormat('wav')
-          .audioFrequency(16000) // 16kHz para Whisper
+          .audioFrequency(16000) // 16kHz para Whisper (óptimo)
           .audioChannels(1) // Mono
           .audioBitrate('128k')
+          .audioFilters([
+            'highpass=f=80', // Filtrar ruido de baja frecuencia
+            'lowpass=f=8000', // Filtrar ruido de alta frecuencia
+            'volume=1.2', // Aumentar volumen ligeramente
+            'dynaudnorm' // Normalización dinámica de audio
+          ])
           .on('start', (commandLine) => {
             logger.debug('FFmpeg comando:', commandLine);
           })
@@ -36,12 +42,16 @@ class AudioConverter {
             }
           })
           .on('end', () => {
-            logger.success('Audio convertido a WAV exitosamente');
+            logger.success('Audio convertido a WAV exitosamente (con mejoras de calidad)');
             resolve(outputPath);
           })
           .on('error', (err) => {
             logger.error('Error al convertir audio a WAV', err);
-            reject(err);
+            // Intentar sin filtros si falla
+            logger.warn('Intentando conversión sin filtros avanzados...');
+            this._convertToWavSimple(inputPath, outputPath)
+              .then(resolve)
+              .catch(reject);
           })
           .save(outputPath);
       });
@@ -50,9 +60,25 @@ class AudioConverter {
       throw error;
     }
   }
+  
+  /**
+   * Conversión simple sin filtros (fallback)
+   */
+  _convertToWavSimple(inputPath, outputPath) {
+    return new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .toFormat('wav')
+        .audioFrequency(16000)
+        .audioChannels(1)
+        .audioBitrate('128k')
+        .on('end', () => resolve(outputPath))
+        .on('error', reject)
+        .save(outputPath);
+    });
+  }
 
   /**
-   * Convertir audio a MP3 para mejor compatibilidad con OpenAI Whisper
+   * Convertir audio a MP3 para mejor compatibilidad con OpenAI Whisper (con mejoras de calidad)
    */
   async convertToMp3(inputPath, outputPath = null) {
     try {
@@ -61,15 +87,21 @@ class AudioConverter {
         outputPath = path.join(this.tempPath, `${filename}.mp3`);
       }
 
-      logger.debug('Convirtiendo audio a MP3', { inputPath, outputPath });
+      logger.debug('Convirtiendo audio a MP3 con mejoras de calidad', { inputPath, outputPath });
 
       return new Promise((resolve, reject) => {
         ffmpeg(inputPath)
           .toFormat('mp3')
-          .audioFrequency(16000) // 16kHz para Whisper
+          .audioFrequency(16000) // 16kHz para Whisper (óptimo)
           .audioChannels(1) // Mono
           .audioBitrate('128k')
           .audioCodec('libmp3lame')
+          .audioFilters([
+            'highpass=f=80', // Filtrar ruido de baja frecuencia
+            'lowpass=f=8000', // Filtrar ruido de alta frecuencia
+            'volume=1.2', // Aumentar volumen ligeramente
+            'dynaudnorm' // Normalización dinámica de audio
+          ])
           .on('start', (commandLine) => {
             logger.debug('FFmpeg comando MP3:', commandLine);
           })
@@ -79,12 +111,16 @@ class AudioConverter {
             }
           })
           .on('end', () => {
-            logger.success('Audio convertido a MP3 exitosamente');
+            logger.success('Audio convertido a MP3 exitosamente (con mejoras de calidad)');
             resolve(outputPath);
           })
           .on('error', (err) => {
             logger.error('Error al convertir audio a MP3', err);
-            reject(err);
+            // Intentar sin filtros si falla
+            logger.warn('Intentando conversión MP3 sin filtros avanzados...');
+            this._convertToMp3Simple(inputPath, outputPath)
+              .then(resolve)
+              .catch(reject);
           })
           .save(outputPath);
       });
@@ -92,6 +128,23 @@ class AudioConverter {
       logger.error('Error en conversión de audio a MP3', error);
       throw error;
     }
+  }
+  
+  /**
+   * Conversión MP3 simple sin filtros (fallback)
+   */
+  _convertToMp3Simple(inputPath, outputPath) {
+    return new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .toFormat('mp3')
+        .audioFrequency(16000)
+        .audioChannels(1)
+        .audioBitrate('128k')
+        .audioCodec('libmp3lame')
+        .on('end', () => resolve(outputPath))
+        .on('error', reject)
+        .save(outputPath);
+    });
   }
 
   /**
