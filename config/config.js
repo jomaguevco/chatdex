@@ -38,8 +38,8 @@ module.exports = {
     temperature: parseFloat(process.env.WHISPER_TEMPERATURE || '0.0'), // 0.0 para más precisión
     beam_size: parseInt(process.env.WHISPER_BEAM_SIZE || '10'), // Mayor beam size para mejor reconocimiento (aumentado de 5 a 10)
     best_of: parseInt(process.env.WHISPER_BEST_OF || '5'), // Número de candidatos a evaluar
-    use_api: process.env.WHISPER_USE_API === 'true', // Usar OpenAI API en lugar de local
-    api_key: process.env.OPENAI_API_KEY || '', // API key de OpenAI (opcional)
+    use_api: false, // DESACTIVADO - usar solo Whisper local
+    api_key: '', // No usar API
     api_timeout: parseInt(process.env.WHISPER_API_TIMEOUT || '30000') // Timeout para API (30 segundos)
   },
   

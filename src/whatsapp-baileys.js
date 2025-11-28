@@ -154,6 +154,7 @@ class WhatsAppHandler {
             logger.warn('⚠️ Conexión cerrada, reconectando...');
             this.connected = false;
             this.isConnecting = false;
+            this.messageHandlersConfigured = false; // Resetear handlers para reconexión
             // Reconectar después de un momento
             setTimeout(() => {
               this.initialize().catch(err => {
@@ -164,6 +165,7 @@ class WhatsAppHandler {
             logger.error('❌ Sesión cerrada. Elimina la carpeta baileys-session y reinicia.');
             this.connected = false;
             this.isConnecting = false;
+            this.messageHandlersConfigured = false;
           }
         } else if (connection === 'open') {
           logger.success('\n╔══════════════════════════════════════════════════════════════════════╗');
@@ -191,11 +193,10 @@ class WhatsAppHandler {
             console.log('\n');
           }
 
-          // Configurar handlers de mensajes
-          if (!this.messageHandlersConfigured) {
-            logger.info('📡 Configurando handlers de mensajes...');
-            await this.setupMessageHandlers();
-          }
+          // Configurar handlers de mensajes (siempre después de reconectar)
+          logger.info('📡 Configurando handlers de mensajes...');
+          this.messageHandlersConfigured = false; // Resetear para forzar reconfiguración
+          await this.setupMessageHandlers();
         }
       });
 

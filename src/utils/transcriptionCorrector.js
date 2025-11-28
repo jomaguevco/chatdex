@@ -449,7 +449,8 @@ class TranscriptionCorrector {
   }
   
   /**
-   * Corregir transcripción aplicando todas las correcciones (versión robusta)
+   * Corregir transcripción aplicando solo correcciones de errores reales (versión conservadora)
+   * NO altera transcripciones que ya están correctas
    */
   corregir(transcripcion) {
     if (!transcripcion || typeof transcripcion !== 'string') {
@@ -459,85 +460,85 @@ class TranscriptionCorrector {
     let corregida = transcripcion.trim();
     const original = corregida;
     
-    // 1. Corregir duplicaciones comunes al inicio (más exhaustivo)
-    corregida = corregida.replace(/^con(confirmo|confirmar|confirma|confirmado)/i, '$1');
-    corregida = corregida.replace(/^Con(confirmo|confirmar|confirma|confirmado)/, '$1');
-    corregida = corregida.replace(/^con\s+(confirmo|confirmar|confirma)/i, '$1');
-    corregida = corregida.replace(/^Con\s+(confirmo|confirmar|confirma)/, '$1');
+    // SOLO corregir errores específicos conocidos de Whisper, NO intentar "mejorar" transcripciones correctas
     
-    // 2. Aplicar correcciones del diccionario (búsqueda exhaustiva)
-    // Ordenar categorías por prioridad (las más importantes primero)
-    const categoriasPrioritarias = ['confirmo', 'pedido', 'cancelar', 'transferencia', 'efectivo', 'yape', 'plin'];
-    const otrasCategorias = Object.keys(this.correcciones).filter(cat => !categoriasPrioritarias.includes(cat));
-    const ordenCategorias = [...categoriasPrioritarias, ...otrasCategorias];
+    // 1. Corregir duplicaciones comunes al inicio (solo si existe el error)
+    if (/^con(confirmo|confirmar|confirma|confirmado)/i.test(corregida)) {
+      corregida = corregida.replace(/^con(confirmo|confirmar|confirma|confirmado)/i, '$1');
+    }
     
-    for (const categoria of ordenCategorias) {
-      const variantes = this.correcciones[categoria];
-      if (!Array.isArray(variantes)) continue;
+    // 2. Corregir SOLO palabras mal transcritas conocidas (errores reales de Whisper)
+    // NO usar fuzzy matching ni coincidencias parciales que puedan alterar transcripciones correctas
+    const erroresConocidos = {
+      // Errores de "confirmo"
+      'firumon': 'confirmo',
+      'firmon': 'confirmo',
+      'confirno': 'confirmo',
+      'firumo': 'confirmo',
+      'firmo': 'confirmo',
+      'conconfirmo': 'confirmo',
+      'conconfirmar': 'confirmar',
+      'conconfirma': 'confirma',
       
-      // Primero intentar coincidencia exacta (palabra completa)
-      for (const variante of variantes) {
-        const regex = new RegExp(`\\b${this.escapeRegex(variante)}\\b`, 'gi');
-        if (regex.test(corregida)) {
-          corregida = corregida.replace(regex, this.mapeoFinal[categoria] || categoria);
-          break;
-        }
-      }
+      // Errores de "pedido"
+      'periodo': 'pedido',
+      'pevivo': 'pedido',
+      'teído': 'pedido',
+      'pediro': 'pedido',
+      'pedio': 'pedido',
+      'período': 'pedido',
+      'perido': 'pedido',
+      'pevido': 'pedido',
       
-      // Si no hay coincidencia exacta, intentar coincidencia parcial para categorías prioritarias
-      if (categoriasPrioritarias.includes(categoria)) {
-        for (const variante of variantes) {
-          const varianteLower = variante.toLowerCase();
-          const corregidaLower = corregida.toLowerCase();
-          
-          // Coincidencia parcial (contiene)
-          if (corregidaLower.includes(varianteLower) && varianteLower.length >= 4) {
-            corregida = corregida.replace(new RegExp(variante, 'gi'), this.mapeoFinal[categoria] || categoria);
-            break;
-          }
-        }
-        
-        // Fuzzy matching para palabras clave importantes
-        const palabras = corregida.toLowerCase().split(/\s+/);
-        for (let i = 0; i < palabras.length; i++) {
-          const palabra = palabras[i];
-          if (palabra.length >= 4) {
-            const coincidencia = this.buscarCoincidenciaFuzzy(palabra, variantes, 0.7);
-            if (coincidencia) {
-              palabras[i] = this.mapeoFinal[categoria] || categoria;
-              corregida = palabras.join(' ');
-              break;
-            }
-          }
-        }
+      // Errores de "cancelar"
+      'gonzilar': 'cancelar',
+      'gonzillar': 'cancelar',
+      'gonzil': 'cancelar',
+      'cancilar': 'cancelar',
+      'cancillar': 'cancelar',
+      'cancil': 'cancelar',
+      
+      // Errores de "transferencia"
+      'tranferencia': 'transferencia',
+      'tranferencias': 'transferencias',
+      'tranferir': 'transferir',
+      
+      // Errores de marcas
+      'a vidas': 'adidas',
+      'avidas': 'adidas',
+      'galidas': 'adidas',
+      'galida': 'adidas',
+      'naik': 'nike',
+      
+      // Errores de métodos de pago
+      'yapeo': 'yape',
+      'yapear': 'yape',
+      'yapeando': 'yape',
+      'plino': 'plin',
+      'plinar': 'plin',
+      'plinando': 'plin'
+    };
+    
+    // Aplicar correcciones SOLO para errores conocidos (palabra completa)
+    for (const [error, correccion] of Object.entries(erroresConocidos)) {
+      const regex = new RegExp(`\\b${this.escapeRegex(error)}\\b`, 'gi');
+      if (regex.test(corregida)) {
+        corregida = corregida.replace(regex, correccion);
       }
     }
     
-    // 3. Normalizar espacios múltiples y caracteres especiales
+    // 3. Separar palabras pegadas comunes (solo si existe el patrón)
+    corregida = corregida.replace(/\b(balóno|balono|balón)(SoyCliente|soyCliente|Soy|soy|Cliente|cliente)\b/gi, 'balón soy cliente');
+    
+    // 4. Normalizar espacios múltiples (siempre seguro)
     corregida = corregida.replace(/\s+/g, ' ').trim();
-    corregida = corregida.replace(/[.,;:!?]+/g, '').trim(); // Remover puntuación excesiva
     
-    // 4. Si no hubo cambios significativos pero hay palabras sospechosas, intentar corrección adicional
-    if (corregida === original || corregida.toLowerCase() === original.toLowerCase()) {
-      // Buscar patrones comunes de errores (más exhaustivo)
-      corregida = corregida.replace(/\b(firumon|firmon|confirno|firumo|firmo|conconfirmo|conconfirmar)\b/gi, 'confirmo');
-      corregida = corregida.replace(/\b(periodo|pevivo|teído|pediro|pedio|período|perido|pevido)\b/gi, 'pedido');
-      corregida = corregida.replace(/\b(gonzilar|gonzillar|gonzil|cancilar|cancillar|cancil)\b/gi, 'cancelar');
-      corregida = corregida.replace(/\b(tranferencia|tranferencias|tranferir)\b/gi, 'transferencia');
-      
-      // Correcciones adicionales para métodos de pago
-      corregida = corregida.replace(/\b(yapeo|yapear|yapeando)\b/gi, 'yape');
-      corregida = corregida.replace(/\b(plino|plinar|plinando)\b/gi, 'plin');
-    }
-    
-    // 5. Correcciones finales de normalización
-    // Remover duplicaciones de palabras clave
+    // 5. Remover duplicaciones obvias (solo si existen)
     corregida = corregida.replace(/\b(confirmo\s+confirmo|confirmar\s+confirmar)\b/gi, 'confirmo');
     corregida = corregida.replace(/\b(pedido\s+pedido|pedidos\s+pedidos)\b/gi, 'pedido');
     
-    // Normalizar espacios finales
-    corregida = corregida.replace(/\s+/g, ' ').trim();
-    
+    // Si la transcripción ya estaba correcta, devolverla sin cambios
+    // Solo devolver correcciones si realmente hubo cambios
     return corregida;
   }
   
